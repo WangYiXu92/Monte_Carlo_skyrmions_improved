@@ -914,6 +914,94 @@ class MonteCarlo2D:
                     f.write(f"{T:.4f} {m:.4f} {s:.4f}\n")
         return ([o[0] for o in out], [o[1] for o in out], [o[2] for o in out])
 
+    def run_phase_diagram(self, B_list, T_list, equip_steps, calc_steps,
+                          sample_interval=5, protocol="cooling",
+                          classify=True, verbose=True, output_file=None):
+        """B-T 磁相图扫描：每 (B, T) 点平衡 → 分类磁结构。
+
+        Parameters
+        ----------
+        B_list : 磁场列表（Tesla，标量沿 z），外循环。
+        T_list : 温度列表（K），内循环。
+        equip_steps / calc_steps : 每点平衡/统计 sweeps。
+        protocol :
+            'cooling'   — field-cooled：每个 B 从最高 T 起，逐 T 降温，
+                          上一点构型 warm start（退火路径，skyrmion 相最易出现）。
+            'heating'   — 每个 B 从最低 T 起逐 T 升温（ZFC-like，检查滞后）。
+            'fresh'     — 每点独立随机态（无记忆，最慢，无滞后路径）。
+        classify : True → 每点跑 magnetic_structure_analysis + skyrmion 计数。
+        output_file : 可选，写 CSV（B,T,phase,M,Q,n_sk）。
+
+        Returns
+        -------
+        dict:
+            phases : (len(B), len(T)) 相标签数组（'FM'|'AFM'|'helical'|
+                     'skyrmion_lattice'|'multi-q'|'PM'）
+            M, Q, n_sk : 同形状浮点数组
+            B_list, T_list : 输入网格
+        """
+        if protocol not in ("cooling", "heating", "fresh"):
+            raise ValueError("protocol 必须为 'cooling' / 'heating' / 'fresh'")
+        if len(B_list) == 0 or len(T_list) == 0:
+            raise ValueError("B_list / T_list 不能为空")
+        phases = np.empty((len(B_list), len(T_list)), dtype=object)
+        M_arr = np.zeros((len(B_list), len(T_list)))
+        Q_arr = np.zeros((len(B_list), len(T_list)))
+        nsk_arr = np.zeros((len(B_list), len(T_list)))
+
+        # 预热 JIT
+        self.mc_step(float(T_list[0]))
+        t_idx = {float(t): i for i, t in enumerate(T_list)}  # T → 列索引
+
+        for ib, B in enumerate(B_list):
+            self.ham.B_field_meV = np.array([0.0, 0.0, B]) * MU_S_MEV_PER_T
+            Ts = T_list if protocol in ("cooling", "fresh") else T_list[::-1]
+            if protocol == "fresh":
+                self.spins = self._random_spins()
+            for T in Ts:
+                it = t_idx[float(T)]
+                for _ in range(equip_steps):
+                    self.mc_step(float(T))
+                # 统计平均
+                Msum = Qsum = nsk = 0.0
+                n_samp = 0
+                for _ in range(calc_steps):
+                    self.mc_step(float(T))
+                    Msum += self.get_magnetization()[0]
+                    if sample_interval > 0 and n_samp % sample_interval == 0:
+                        Qsum += abs(self.topological_charge())
+                        if classify:
+                            nsk += len(self.skyrmion_positions())
+                    n_samp += 1
+                M_arr[ib, it] = Msum / n_samp
+                Q_arr[ib, it] = Qsum / max(1, n_samp // sample_interval)
+                if classify:
+                    res = self.magnetic_structure_analysis()
+                    order = res["order"]
+                    n_sk = nsk / max(1, n_samp // sample_interval)
+                    nsk_arr[ib, it] = n_sk
+                    # skyrmion 计数优先于 S(q) 分类（S(q) 对少 skyrmion 不敏感）
+                    if n_sk >= 1 and res["top_charge"] != 0:
+                        order = "skyrmion_lattice"
+                    phases[ib, it] = order
+                    if verbose:
+                        print(f"B={B:5.2f} T T={T:7.3f} K | {order:16s} | "
+                              f"M={M_arr[ib, it]:.3f} "
+                              f"Q={Q_arr[ib, it]:.2f} "
+                              f"N_sk={n_sk:.1f}")
+                else:
+                    if verbose:
+                        print(f"B={B:5.2f} T T={T:7.3f} K | M={M_arr[ib, it]:.3f}")
+        if output_file:
+            with open(output_file, "w") as f:
+                f.write("B,T,phase,M,Q,n_skyrmion\n")
+                for ib, B in enumerate(B_list):
+                    for it, T in enumerate(T_list):
+                        f.write(f"{B:.4f},{T:.4f},{phases[ib, it]},"
+                                f"{M_arr[ib, it]:.6f},{Q_arr[ib, it]:.6f},{nsk_arr[ib, it]:.4f}\n")
+        return {"phases": phases, "M": M_arr, "Q": Q_arr, "n_sk": nsk_arr,
+                "B_list": np.asarray(B_list), "T_list": np.asarray(T_list)}
+
     def run_spin_dynamics(self, dt, n_steps, T, damping=0.1, save_interval=10,
                           seed=None, output_prefix=None):
         """Langevin 自旋动力学（经典 LLG + 热噪声，Heun 积分）。
