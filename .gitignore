@@ -1,0 +1,8 @@
+# 运行输出（可复现，无需提交）
+skyrmion_spins.txt
+curie_results.txt
+curie_seeds_results.txt
+hysteresis_loop.txt
+*.png
+__pycache__/
+*.pyc
