@@ -745,6 +745,175 @@ class MonteCarlo2D:
                     f.write(f"MAGMOM = {magmom}\n")
         return text, magmom
 
+    def skyrmion_topological_density(self):
+        """每格点拓扑荷密度 ρ_Q(x,y)（Berg–Lüscher 三角形贡献 1/3 分摊到三顶点）。
+
+        ∫ρ_Q d²r = Q_total（skyrmion 数，反 skyrmion 为负）。中心检测见
+        skyrmion_positions（mz 局部极小 + 拓扑荷验证）。仅支持 Nb=1 三角格。
+        """
+        if self.lat.Nb != 1:
+            raise NotImplementedError("拓扑荷密度目前只适用于 Nb=1 的三角晶格")
+        Nx, Ny = self.lat.Nx, self.lat.Ny
+
+        def solid_angle(a, b, c):
+            num = np.dot(a, np.cross(b, c))
+            den = 1.0 + np.dot(a, b) + np.dot(b, c) + np.dot(c, a)
+            return 2.0 * np.arctan2(num, den)
+
+        rho = np.zeros((Nx, Ny))
+        for x in range(Nx):
+            xp = (x + 1) % Nx
+            for y in range(Ny):
+                yp = (y + 1) % Ny
+                s00 = self.spins[x, y, 0]
+                s10 = self.spins[xp, y, 0]
+                s01 = self.spins[x, yp, 0]
+                s11 = self.spins[xp, yp, 0]
+                w = solid_angle(s00, s10, s01) / (4.0 * np.pi) / 3.0
+                rho[x, y] += w
+                rho[xp, y] += w
+                rho[x, yp] += w
+                w = solid_angle(s10, s11, s01) / (4.0 * np.pi) / 3.0
+                rho[xp, y] += w
+                rho[xp, yp] += w
+                rho[x, yp] += w
+        return rho
+
+    def skyrmion_positions(self, min_density=0.25, mz_core=-0.5, r_verify=2):
+        """skyrmion 中心检测：mz 局部极小 + 拓扑荷验证。
+
+        1. 候选 = mz < mz_core 的 3×3 邻域极小
+        2. 验证：候选周围 r_verify 内 |Σρ_Q| ≥ min_density（真 skyrmion）
+        3. 邻近候选去重（取 ρ_Q 绝对值更大者）
+
+        返回 [(x, y, Q_local), ...]。
+        """
+        rho = self.skyrmion_topological_density()
+        Nx, Ny = rho.shape
+        mz = self.spins[:, :, 0, 2]
+        cands = []
+        for x in range(Nx):
+            for y in range(Ny):
+                if mz[x, y] >= mz_core:
+                    continue
+                if all(mz[x, y] <= mz[(x+dx) % Nx, (y+dy) % Ny]
+                       for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                       if not (dx == 0 and dy == 0)):
+                    cands.append((x, y))
+        # 拓扑荷验证 + 去重（合并半径 r_verify 内候选）
+        centers = []
+        used = set()
+        for (x, y) in sorted(cands, key=lambda c: mz[c]):
+            if any((x-cx) % Nx <= r_verify and (y-cy) % Ny <= r_verify
+                   for (cx, cy, _q) in centers):
+                continue
+            # 局部拓扑荷
+            q_local = 0.0
+            for dx in range(-r_verify, r_verify+1):
+                for dy in range(-r_verify, r_verify+1):
+                    q_local += rho[(x+dx) % Nx, (y+dy) % Ny]
+            if abs(q_local) >= min_density:
+                centers.append((x, y, q_local))
+        centers.sort(key=lambda c: -abs(c[2]))
+        return centers
+
+    def skyrmion_statistics(self, mz_cross=0.0):
+        """skyrmion 统计：半径（mz=mz_cross 等值面）、面积占比、密度、晶格常数。
+
+        - 半径：从中心沿 6 个 NN 方向找 mz 首次过 mz_cross 的距离，取平均
+        - 密度：N_skyrmion / 超胞面积（以 |a1×a2| 为单位）
+        - 晶格常数：中心最近邻距离（无 PBC 距离的近似——用最小非零距离）
+        """
+        centers = self.skyrmion_positions()
+        Nx, Ny = self.lat.Nx, self.lat.Ny
+        coords = self.lat.get_cartesian_coords()
+        a1, a2 = np.array(self.lat.a_vecs[0]), np.array(self.lat.a_vecs[1])
+        cell_area = abs(a1[0]*a2[1] - a1[1]*a2[0])
+
+        radii, qs = [], []
+        for (x, y, q) in centers:
+            # 6 个 NN 方向（三角格）
+            dirs = [(1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1), (1, -1)]
+            rs = []
+            for (dx, dy) in dirs:
+                # 从中心向外扫描 mz 剖面
+                for t in range(1, max(Nx, Ny)):
+                    x2 = (x + t*dx) % Nx
+                    y2 = (y + t*dy) % Ny
+                    mz = self.spins[x2, y2, 0, 2]
+                    r_now = np.hypot(t*dx*a1[0] + t*dy*a2[0],
+                                     t*dx*a1[1] + t*dy*a2[1])
+                    if mz >= mz_cross:
+                        # 线性插值细化
+                        if t > 1:
+                            x1 = (x + (t-1)*dx) % Nx
+                            y1 = (y + (t-1)*dy) % Ny
+                            mz0 = self.spins[x1, y1, 0, 2]
+                            r_prev = np.hypot((t-1)*dx*a1[0] + (t-1)*dy*a2[0],
+                                              (t-1)*dx*a1[1] + (t-1)*dy*a2[1])
+                            if mz0 != mz:
+                                f = (mz_cross - mz0) / (mz - mz0)
+                                r_now = r_prev + f * (r_now - r_prev)
+                        rs.append(r_now)
+                        break
+                else:
+                    rs.append(None)
+            ok = [r for r in rs if r is not None]
+            if ok:
+                radii.append(np.mean(ok))
+            qs.append(q)
+
+        # 晶格常数：中心间最近距离（周期性最小镜像）
+        lat_const = None
+        if len(centers) >= 2:
+            from itertools import combinations
+            dmin = 1e18
+            pts = [np.array([c[0], c[1]]) for c in centers]
+            for i, j in combinations(range(len(pts)), 2):
+                d = pts[i] - pts[j]
+                for sx in (-1, 0, 1):
+                    for sy in (-1, 0, 1):
+                        dv = d + np.array([sx*Nx, sy*Ny])
+                        rv = dv[0]*a1 + dv[1]*a2
+                        dmin = min(dmin, np.hypot(rv[0], rv[1]))
+            lat_const = dmin if dmin < 1e17 else None
+
+        return {
+            "n_skyrmions": len(centers),
+            "centers": centers,
+            "radius_mean": float(np.mean(radii)) if radii else None,
+            "radius_std": float(np.std(radii)) if radii else None,
+            "total_Q": float(np.sum(rho := self.skyrmion_topological_density())),
+            "density_per_area": len(centers) / (Nx*Ny*cell_area) if cell_area else None,
+            "lattice_constant": lat_const,
+        }
+
+    def skyrmion_stability(self, T_list, equip_steps, calc_steps, output_file=None):
+        """升温扫描：skyrmion 存活数 vs 温度（热稳定性曲线）。
+
+        从当前构型开始，逐 T 升温：每 T 先平衡（equip_steps sweeps）再统计
+        （calc_steps 平均）skyrmion 数量（局部极大个数，min_density 用其 0.25）。
+
+        返回 (T_list, N_list, N_std_list)。
+        """
+        out = []
+        for T in T_list:
+            for _ in range(equip_steps):
+                self.mc_step(float(T))
+            ns = []
+            for _ in range(calc_steps):
+                self.mc_step(float(T))
+                ns.append(len(self.skyrmion_positions()))
+            mean, std = float(np.mean(ns)), float(np.std(ns))
+            out.append((T, mean, std))
+            print(f"T = {T:7.3f} K | N_skyrmion = {mean:6.2f} ± {std:5.2f}")
+        if output_file:
+            with open(output_file, "w") as f:
+                f.write("# T(K) N_skyrmion N_std\n")
+                for (T, m, s) in out:
+                    f.write(f"{T:.4f} {m:.4f} {s:.4f}\n")
+        return ([o[0] for o in out], [o[1] for o in out], [o[2] for o in out])
+
     def topological_charge(self):
         """三角格/六角格上的离散 skyrmion 数（周期性边界）。
 

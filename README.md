@@ -106,6 +106,20 @@ text, magmom = mc.export_magnetic_cell_poscar("magnetic_cell.POSCAR",
 - 晶格矢量 = 磁单胞基矢 × 原胞 a_vecs；坐标 = 单胞格点笛卡尔 → 分数（wrap）
 - 已验证：AFM（2 原子 ±z）、skyrmion 晶格（144 原子 = 12×12 单胞，|m|=2.5 处处，单胞面积精确）
 
+### Skyrmion 定位与统计（热稳定性）
+
+```python
+centers = mc.skyrmion_positions()          # [(x, y, Q_local), ...]：mz 局部极小 + 拓扑荷验证
+st = mc.skyrmion_statistics()              # 半径（mz=0 等值面）、密度、晶格常数、total_Q
+Ts, Ns, Nstd = mc.skyrmion_stability(T_list, equip_steps, calc_steps)  # 熔化曲线
+```
+
+- **定位**：mz 局部极小（< −0.5）→ 周围 r=2 内 |Σρ_Q| ≥ 0.25 验证（ρ_Q 为 Berg–Lüscher 三角形 1/3 分摊）→ 邻近去重。已验证：12×12 晶格 16/16 精确、单 skyrmion 1/1
+- **统计**：半径沿 6 个 NN 方向 mz 过零插值；晶格常数 = 中心间最小周期距离
+- **稳定性**：升温扫描逐 T 平衡 + 统计 skyrmion 数 → 阶跃熔化曲线（demo 实测：J=−40/D=4/B=1T 下 9 个 skyrmion 3-6K 全活 → 12K 半数 → 30K 殆尽 → 36K 归零）
+- ⚠️ 物理窗口：D/J 太弱（<0.06）时 skyrmion 晶格不是哈密顿量稳定态，构造晶格一加热即湮灭（小 λ 势垒低）；稳定曲线需 D/J ≳ 0.1 + 合适 B
+- 示例：`cd MCE_demo && python3 skyrmion_analysis_demo.py` → skyrmion_stability.png
+
 ### 多 seed 并行（统计误差估计）
 
 ```python
