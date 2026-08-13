@@ -6,3 +6,4 @@ hysteresis_loop.txt
 *.png
 __pycache__/
 *.pyc
+mce_results.txt
