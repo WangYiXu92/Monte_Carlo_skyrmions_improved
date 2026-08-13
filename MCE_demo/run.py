@@ -50,6 +50,7 @@ MCE_PARAMS = {
     "equip_steps": 3000,
     "calc_steps": 4000,
     "sample_interval": 2,
+    "molar_mass_g_per_mol": 432.7,           # CrI₃ 摩尔质量（g/mol，每 Cr 自旋）
     "output_file": "mce_results.txt",
 }
 
@@ -57,14 +58,14 @@ if __name__ == "__main__":
     mc = build_simulator()
     T, B, S, dS_M, C, dT_ad = mc.run_magnetocaloric(**MCE_PARAMS)
 
-    # 摘要输出
-    print("\n===== MCE 摘要 =====")
-    print("T(K)   ΔS_M(0→6T) [kB/spin]   ΔT_ad(0→6T) [K]   C [kB/spin]")
+    # 摘要输出（ΔS_M 与 C 单位 J/(kg·K)）
+    print("\n===== MCE 摘要（ΔS_M / C 单位: J/(kg·K)）=====")
+    print("T(K)   ΔS_M(0→6T) [J/kg/K]   ΔT_ad(0→6T) [K]   C [J/kg/K]")
     i6 = len(B) - 1
     for i in range(0, len(T), 3):
         print(f"{T[i]:5.1f}   {dS_M[i, i6-1]:+10.4f}          {dT_ad[i, i6-1]:+8.2f}        {C[i, 0]:7.4f}")
     i_pk = np.argmin(dS_M[:, i6-1])
-    print(f"\n|ΔS_M| 峰值: T = {T[i_pk]:.1f} K, ΔS_M = {dS_M[i_pk, i6-1]:.4f} kB/spin (0→6 T)")
+    print(f"\n|ΔS_M| 峰值: T = {T[i_pk]:.1f} K, ΔS_M = {dS_M[i_pk, i6-1]:.4f} J/(kg·K) (0→6 T)")
     if np.all(np.isnan(dT_ad[:, i6-1])):
         print("ΔT_ad: 无等熵解（绝对熵曲线未覆盖所需范围）")
     else:

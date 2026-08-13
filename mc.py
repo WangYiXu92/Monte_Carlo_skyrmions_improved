@@ -317,7 +317,8 @@ class MonteCarlo2D:
         return q1, q2, S
 
     def run_magnetocaloric(self, T_list, B_list, equip_steps, calc_steps,
-                           sample_interval=1, output_file="mce_results.txt"):
+                           sample_interval=1, output_file="mce_results.txt",
+                           molar_mass_g_per_mol=None):
         """磁热效应：多场温度扫描，输出熵变 ΔS_M(T) 与绝热温变 ΔT_ad(T)。
 
         物理（经典连续自旋，k_B=1）：
@@ -326,11 +327,17 @@ class MonteCarlo2D:
           ΔT_ad(T₁) = T₂ − T₁，其中 S(T₂,B) = S(T₁,0)   （等熵构造，严格）
           C(T) = Var(E)/(k_B T²)                      （涨落公式）
 
+        单位：
+          molar_mass_g_per_mol 给定时（每磁性自旋的摩尔质量，如 CrI₃=432.7），
+          ΔS_M 与 C 输出为 J/(kg·K)（换算因子 R/M_mol×10³，R=8.3145 J/mol·K）；
+          None 时保持 k_B/自旋（ΔT_ad 恒为 K）。
+
         返回 (T_grid, B_list, S_matrix, dS_M, C_matrix, dT_ad)：
-          S_matrix[nT, nB]   每自旋绝对熵（k_B 单位；低 T 仅供参考）
-          dS_M[nT, nB-1]     列 j = S(T,B_{j+1}) − S(T,0)（麦克斯韦关系）
-          C_matrix[nT, nB]   每自旋热容（k_B 单位）
+          S_matrix[nT, nB]   每自旋绝对熵（低 T 仅供参考）
+          dS_M[nT, nB-1]     列 j = ΔS_M 相对 B=0（麦克斯韦关系）
+          C_matrix[nT, nB]   每自旋热容
           dT_ad[nT, nB-1]    列 j = ΔT_ad 相对 B=0（等熵构造 S(T₂,B)=S(T₁,0)；无解为 NaN）
+          （molar_mass 给定时 S/dS_M/C 单位 J/(kg·K)，否则 k_B/自旋）
         """
         import numpy as np
         T_list = np.asarray(T_list, float)
@@ -434,11 +441,21 @@ class MonteCarlo2D:
         inv2 = np.argsort(T_asc2)
         dT_ad = dT_ad[inv2]
 
+        # ---- 单位换算：k_B/自旋 → J/(kg·K)（molar_mass_g_per_mol 给定时）----
+        # 换算因子 = R/M_mol×10³（R = k_B·N_A = 8.3145 J/(mol·K)）
+        if molar_mass_g_per_mol is not None:
+            conv = 8.314462618 / (molar_mass_g_per_mol * 1e-3)   # J/(kg·K) per k_B/spin
+            S = S * conv
+            dS_M = dS_M * conv
+            C = C * conv
+
         if output_file is not None:
+            unit = "J_per_kg_per_K" if molar_mass_g_per_mol is not None else "kB_per_spin"
             with open(output_file, "w") as f:
-                f.write("# T(K) B(T) E_meV_per_spin M C_kB_per_spin S_abs_kB_per_spin "
-                        "dS_M_relB0_kB_per_spin dT_ad_relB0_K\n")
-                f.write("# dS_M/dT_ad 列 = 相对 B=0 的磁熵变/绝热温变（麦克斯韦关系）\n")
+                f.write(f"# T(K) B(T) E_meV_per_spin M C_{unit} S_abs_{unit} "
+                        f"dS_M_relB0_{unit} dT_ad_relB0_K\n")
+                f.write("# dS_M/dT_ad 列 = 相对 B=0 的磁熵变/绝热温变；"
+                        "dS_M 用麦克斯韦关系，dT_ad 用等熵构造\n")
                 for i, T in enumerate(T_list):
                     for j in range(nB):
                         f.write(f"{T:.4f} {B_list[j]:.4f} {U[i,j]:.8f} {M[i,j]:.6f} "
