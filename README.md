@@ -94,6 +94,18 @@ r = mc.magnetic_structure_analysis()
 - 示例：`cd MCE_demo && python3 analyze_magnetic_demo.py`
 - 注意：单个（非晶格）skyrmion 无晶格周期 → 无 q* 峰、单胞=整胞（Q 仍是判别键）
 
+**导出 VASP POSCAR（磁结构 → DFT 输入）**：
+
+```python
+text, magmom = mc.export_magnetic_cell_poscar("magnetic_cell.POSCAR",
+                                              spin_scale=1.0, species=["Cr"])
+# 生成 magnetic_cell.POSCAR（2D 晶格 + z 真空层）+ magnetic_cell.POSCAR.magmom
+# MAGMOM = Sx Sy Sz ...（单位矢量 × spin_scale），直接粘贴进 INCAR
+```
+
+- 晶格矢量 = 磁单胞基矢 × 原胞 a_vecs；坐标 = 单胞格点笛卡尔 → 分数（wrap）
+- 已验证：AFM（2 原子 ±z）、skyrmion 晶格（144 原子 = 12×12 单胞，|m|=2.5 处处，单胞面积精确）
+
 ### 多 seed 并行（统计误差估计）
 
 ```python

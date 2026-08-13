@@ -582,7 +582,7 @@ class MonteCarlo2D:
                 order = "skyrmion_lattice" if abs(Q) > 0.3 else "multi-q"
 
         # --- 3. 磁单胞提取（q*·R ∈ ℤ 的所有 R 的子格）---
-        cell_matrix, cell_spins, nrep = self._extract_magnetic_cell(q_stars, order)
+        cell_matrix, cell_spins, nrep, cell_sites = self._extract_magnetic_cell(q_stars, order)
 
         return {
             "order": order,
@@ -591,6 +591,7 @@ class MonteCarlo2D:
             "top_charge": Q if order in ("skyrmion_lattice", "multi-q") else 0.0,
             "cell_matrix": cell_matrix,
             "cell_spins": cell_spins,
+            "cell_sites": cell_sites,
             "cell_repeats": nrep,
         }
 
@@ -600,8 +601,8 @@ class MonteCarlo2D:
         if order == "FM" or not q_stars:
             # 单胞 = 1×1（FM）或整超胞（PM 无周期，返回整胞）
             if order == "FM":
-                return [[1, 0], [0, 1]], self.spins[:1, :1].copy(), Nx * Ny
-            return [[Nx, 0], [0, Ny]], self.spins.copy(), 1
+                return [[1, 0], [0, 1]], self.spins[:1, :1].copy(), Nx * Ny, [(0, 0)]
+            return [[Nx, 0], [0, Ny]], self.spins.copy(), 1, [(x, y) for x in range(Nx) for y in range(Ny)]
         L = Nx * Ny
         mods = []
         for (i, j) in q_stars:
@@ -677,7 +678,72 @@ class MonteCarlo2D:
         grid = np.zeros((nx, ny, Nb, 3))
         for k in range(ncell):
             grid[k // ny, k % ny] = cell[k]
-        return [[m1, n1], [m2, n2]], grid, nrep
+        return [[m1, n1], [m2, n2]], grid, nrep, uniq
+
+    def export_magnetic_cell_poscar(self, path="magnetic_cell.POSCAR", spin_scale=1.0,
+                                    species=None, vacuum_z=1.0, write_magmom=True):
+        """导出磁单胞为 VASP POSCAR（2D 晶格 + z 真空层）+ MAGMOM 磁构型。
+
+        - 结构：磁单胞晶格矢量 = cell_matrix × 原胞 a_vecs（z 固定为真空层厚度）；
+          原子坐标 = 单胞格点（超胞整数坐标 → 笛卡尔 → 单胞分数坐标，wrap 到 [0,1)）
+        - 磁性：MAGMOM 每原子 3 分量 = 自旋单位矢量 × spin_scale（默认 1.0，即单位矢量；
+          传 S 或 μ_B 值可缩放）
+        - 多子格：每格点 Nb 个原子（basis 位置）
+        - write_magmom=True 时同时写 <path>.magmom（可直接粘贴进 INCAR）
+
+        返回 (poscar 文本, magmom 字符串)。
+        """
+        r = self.magnetic_structure_analysis()
+        sites = r["cell_sites"]
+        cs = r["cell_spins"]                     # (nx, ny, Nb, 3)
+        Nb = cs.shape[2]
+        coords_all = self.lat.get_cartesian_coords()
+
+        (m1, n1), (m2, n2) = r["cell_matrix"]
+        a1 = np.array([self.lat.a_vecs[0][0], self.lat.a_vecs[0][1], 0.0])
+        a2 = np.array([self.lat.a_vecs[1][0], self.lat.a_vecs[1][1], 0.0])
+        L1 = m1 * a1 + n1 * a2
+        L2 = m2 * a1 + n2 * a2
+        L3 = np.array([0.0, 0.0, vacuum_z])
+        lat_mat = np.array([[L1[0], L2[0]], [L1[1], L2[1]]])   # 2×2（列 = 基矢）
+        inv = np.linalg.inv(lat_mat)
+
+        atoms = []      # (frac_x, frac_y, frac_z, spin)
+        for k, (x, y) in enumerate(sites):
+            for b in range(Nb):
+                cart2 = coords_all[x, y, b]         # (2,)
+                frac = inv @ cart2
+                frac = frac % 1.0
+                frac = np.where(frac > 1.0 - 1e-10, 0.0, frac)   # 浮点舍入保护
+                spin = cs[k // cs.shape[1], k % cs.shape[1], b] * spin_scale
+                atoms.append((frac[0], frac[1], 0.0, spin))
+        n_atoms = len(atoms)
+
+        sp = species if species is not None else ["Spin"] * n_atoms
+        if len(sp) != n_atoms:
+            sp = ["Spin"] * n_atoms
+
+        lines = [f"Magnetic cell from Monte Carlo (order={r['order']}, Q={r['top_charge']:.3f}, "
+                 f"cell={r['cell_matrix']})"]
+        lines.append("1.0")
+        for L in (L1, L2, L3):
+            lines.append(f"  {L[0]: .6f} {L[1]: .6f} {L[2]: .6f}")
+        lines.append(" ".join(sorted(set(sp))))
+        lines.append(str(n_atoms))
+        lines.append("Direct")
+        for (fx, fy, fz, _s) in atoms:
+            lines.append(f"  {fx: .8f} {fy: .8f} {fz: .8f}")
+
+        magmom = " ".join(f"{s[0]:.6f} {s[1]:.6f} {s[2]:.6f}" for (_f, _g, _h, s) in atoms)
+
+        text = "\n".join(lines) + "\n"
+        if path:
+            with open(path, "w") as f:
+                f.write(text)
+            if write_magmom:
+                with open(path + ".magmom", "w") as f:
+                    f.write(f"MAGMOM = {magmom}\n")
+        return text, magmom
 
     def topological_charge(self):
         """三角格/六角格上的离散 skyrmion 数（周期性边界）。
