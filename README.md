@@ -8,8 +8,10 @@
 ## Features
 
 1. **Skyrmion**：固定磁场下模拟退火，输出自旋构型 + 拓扑数 Q
-2. **Curie temperature**：温度扫描输出平均磁矩 M(T)、磁化率 χ(T)
+2. **Curie temperature**：温度扫描输出平均磁矩 M(T)、磁化率 χ(T)、热容 C(T)
 3. **Hysteresis loop**：磁场扫描输出 <M_z>(B)，保留历史 → 真磁滞
+4. **Magnetocaloric (MCE)**：多场温度扫描 → ΔS_M(T)（麦克斯韦关系）+ ΔT_ad(T)（绝热温变）
+5. **Spin structure factor S(q)**：自旋构型 FFT → 识别磁序（FM q=0 峰 / 螺旋 q* / skyrmion 晶格 Bragg 峰）
 
 ## 模型
 
@@ -32,9 +34,31 @@ python run.py            # 根目录：三角格 skyrmion 退火
 cd CrI3_test_curie && python run.py     # honeycomb 双子格居里温度
 cd MX2 && python run.py                 # 三角格磁滞回线
 cd AFM_honeycomb && python run.py       # AFM honeycomb + DMI skyrmion
+cd MCE_demo && python run.py            # CrI3 型磁热效应 ΔS_M + ΔT_ad
 ```
 
 改 `SIMULATION_MODE` 和对应参数块即可切换功能。
+
+### 磁热效应（MCE）
+
+```python
+T, B, S_abs, dS_M, C, dT_ad = mc.run_magnetocaloric(
+    T_list=np.linspace(100, 1, 30), B_list=[0, 2, 4, 6],
+    equip_steps=3000, calc_steps=4000, sample_interval=2,
+)
+```
+
+- **ΔS_M 用麦克斯韦关系**：ΔS_M(T,ΔB) = ∫₀^{ΔB} (∂M/∂T)_{B'} dB'（稳、无外推、T→0 自动归零）
+- 绝对熵 S(T,B) = ln(4π) − ∫₀^β (E−E₀)dβ' + β(E−E₀) 也输出（低 T 需充分平衡否则不可靠）
+- C(T) = N·Var(e)/(k_B T²)（涨落公式）
+- 验收：ΔS_M<0（常规 MCE）、|ΔS_M| 峰在 Tc、ΔT_ad>0、T→0 归零
+- 已验证：J=0 体系与单自旋解析解吻合（±0.006 k_B）；CrI3 演示 |ΔS_M| 峰 0.16 k_B/spin @ 35 K ≈ Tc
+
+### 自旋结构因子
+
+```python
+q1, q2, S = mc.spin_structure_factor()   # FFT 频域索引 + S(q) 网格
+```
 
 ### 多 seed 并行（统计误差估计）
 
