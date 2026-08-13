@@ -12,6 +12,7 @@
 3. **Hysteresis loop**：磁场扫描输出 <M_z>(B)，保留历史 → 真磁滞
 4. **Magnetocaloric (MCE)**：多场温度扫描 → ΔS_M(T)（麦克斯韦关系）+ ΔT_ad(T)（绝热温变）
 5. **Spin structure factor S(q)**：自旋构型 FFT → 识别磁序（FM q=0 峰 / 螺旋 q* / skyrmion 晶格 Bragg 峰）
+6. **Magnon spectra**：共线 FM 线性自旋波（HP 一阶）色散 ω(k)（多子格、各向异性隙、Zeeman 隙）
 
 ## 模型
 
@@ -61,6 +62,18 @@ T, B, S_abs, dS_M, C, dT_ad = mc.run_magnetocaloric(
 ```python
 q1, q2, S = mc.spin_structure_factor()   # FFT 频域索引 + S(q) 网格
 ```
+
+### 磁振子色散（线性自旋波）
+
+```python
+kpath = [(0,0), (1/3,1/3), (0.5,0), (0,0)]   # 分数坐标
+ks, omega = mc.magnon_spectrum(kpath, S=1.5, B_field=(0,0,0))  # meV
+```
+
+- **公式**：ω_k = S|J|Σ_δ(1−cos k·δ) + 2S|A| + μ_s·B_z（多子格取 bond 矩阵 J_zz 与横向分量；A<0 易轴给 2S|A| 隙）
+- **已校准**：1D 4-环 S=1..3 精确对角化——k=π/2 精确匹配；k=π 处 0.75/0.875/0.917 = 1/(2S) 量子修正收敛（LSWT 是经典极限）
+- **限制**：仅共线 FM；DMI（反对称 J）忽略（基态倾斜，需非共线 LSWT）；AFM/非共线不支持
+- 示例：`cd MCE_demo && python3 magnon_demo.py` → magnon_band.png（honeycomb CrI3 双带：Γ 隙 1.5 meV = 2S|A|）
 
 ### 多 seed 并行（统计误差估计）
 

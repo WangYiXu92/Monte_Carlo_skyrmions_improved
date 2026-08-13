@@ -316,6 +316,47 @@ class MonteCarlo2D:
         q2 = np.fft.fftfreq(Ny) * Ny
         return q1, q2, S
 
+    def magnon_spectrum(self, k_path, S=1.0, B_field=(0.0, 0.0, 0.0)):
+        """共线铁磁磁振子色散 ω(k)（线性自旋波理论，Holstein–Primakoff 一阶）。
+
+        公式（已用 1D 4-环 S=1..3 精确对角化校准，见 references）：
+          ω_k = S·|J|·Σ_δ(1 − cos k·δ) + 2S|A| + μ_s·B_z   （各向同性 J；多子格取
+          bond 矩阵的 J_zz 与横向 (J_xx+J_yy)/2；A<0 易轴给能隙 2S|A|；B_z 给 Zeeman 隙）
+
+        k_path : 分数坐标 k 列表，如 [(0,0), (1/3,1/3), (1/2,0), (0,0)]
+        S      : 自旋量子数（LSWT 是 S→∞ 极限，S=1 时偏差 ~1/(2S)）
+        B_field: 纵向外场 (Tesla)
+
+        限制：仅共线 FM 基态；反对称 J（DMI）忽略——界面 DMI 使基态倾斜，
+        共线 LSWT 不合法（给出伪线性项）；非共线/AFM 基态不支持。
+
+        返回 (k_list, omega)：omega[nk, nband] 单位 meV。
+        """
+        Nb = self.lat.Nb
+        Bz_meV = B_field[2] * MU_S_MEV_PER_T
+        omegas = []
+        for (kx, ky) in k_path:
+            M = np.zeros((Nb, Nb), dtype=complex)
+            for mu in range(Nb):
+                f1m, f2m = self.lat.basis[mu]
+                for (nu, dx, dy, Jm) in self.ham.bonds[mu]:
+                    Jzz = Jm[2, 2]
+                    Jxy = 0.5 * (Jm[0, 0] + Jm[1, 1])
+                    f1n, f2n = self.lat.basis[nu]
+                    # 相位：r_μ − r_ν = (τ_μ−τ_ν) − δ（分数坐标）
+                    ph = 2*np.pi*(kx*(f1m-f1n-dx) + ky*(f2m-f2n-dy))
+                    # 每 directed bond 的 ½（双向存储的双计数修正）
+                    M[mu, mu] += 0.5 * (-S * Jzz)              # a†_μ a_μ
+                    M[nu, nu] += 0.5 * (-S * Jzz)              # a†_ν a_ν
+                    M[mu, nu] += 0.5 * S * (Jzz + Jxy) * np.exp(-1j*ph)
+            # 单离子各向异性（A<0 易轴 → +2S|A|）与外场（Zeeman）
+            for mu in range(Nb):
+                M[mu, mu] += -2.0 * S * self.ham.A[mu] + Bz_meV
+            w = np.linalg.eigvalsh(M)
+            w = np.maximum(w, 0.0)          # 数值小负值归零（Goldstone）
+            omegas.append(w)
+        return list(k_path), np.array(omegas)
+
     def run_magnetocaloric(self, T_list, B_list, equip_steps, calc_steps,
                            sample_interval=1, output_file="mce_results.txt",
                            molar_mass_g_per_mol=None):
