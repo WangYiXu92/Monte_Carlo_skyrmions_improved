@@ -134,6 +134,17 @@ qs, omega, S = mc.dynamic_structure_factor(traj, times, q_grid=[(4,0), ...])
 - ⚠️ 稳定性要求：dt·ω_max ≲ 0.15（ω_max = S·z·|J| 量级）；Heun 需 `S0.copy()` 防引用污染（历史爆炸根因）
 - 示例：`cd MCE_demo && python3 spin_dynamics_demo.py` → sw_spectrum.png（S(q,ω) 强度图 + LSWT 色散线叠加）
 
+### OVITO/XYZ 导出（磁构型动画）
+
+```python
+mc.export_xyz("spins.xyz", species="Cr", spin_scale=1.0)            # 单帧
+mc.export_xyz("traj.xyz", trajectory=traj, spin_scale=1.0)          # 动力学轨迹多帧
+```
+
+- 标准 .xyz 多帧格式 + Lattice 头（OVITO 直接打开渲染磁矩矢量场）
+- 每原子 3 列 = 自旋矢量 × spin_scale（OVITO Vector 属性）
+- 已验证：单帧 36 原子 |spin|=2.0 处处、多帧 10 帧结构正确
+
 ### 多 seed 并行（统计误差估计）
 
 ```python

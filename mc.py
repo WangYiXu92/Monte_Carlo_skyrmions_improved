@@ -1029,6 +1029,40 @@ class MonteCarlo2D:
             S[a] = np.fft.rfft(C[a].real).real * dt
         return q_grid, omega, S
 
+    def export_xyz(self, path="spins.xyz", species=None, spin_scale=1.0, trajectory=None):
+        """导出自旋构型为 .xyz（原子 + 磁矩矢量列），OVITO 直接可视化。
+
+        - 单帧：当前 self.spins；多帧：传 trajectory (n_frames, Nx, Ny, Nb, 3)
+        - 每原子 3 列 = 自旋矢量 × spin_scale（OVITO 可渲染为 vector 场）
+        - species 可传元素符号列表（每原子一个，默认 'X'）
+        """
+        if trajectory is None:
+            frames = [self.spins.copy()]
+        else:
+            frames = list(trajectory)
+        Nx, Ny, Nb, _ = frames[0].shape
+        coords = self.lat.get_cartesian_coords()
+        sp = species if species is not None else "X"
+
+        lines = []
+        for fi, S in enumerate(frames):
+            n_atoms = Nx * Ny * Nb
+            lines.append(str(n_atoms))
+            lines.append(f"Frame {fi}  Lattice=\"{self.lat.a_vecs[0][0]:.6f} {self.lat.a_vecs[0][1]:.6f} 0.0 "
+                         f"{self.lat.a_vecs[1][0]:.6f} {self.lat.a_vecs[1][1]:.6f} 0.0 "
+                         f"0.0 0.0 10.0\"  Properties=species:S:1:pos:R:3:spin:R:3")
+            for x in range(Nx):
+                for y in range(Ny):
+                    for b in range(Nb):
+                        rx, ry = coords[x, y, b]
+                        s = S[x, y, b] * spin_scale
+                        lines.append(f"{sp} {rx:.6f} {ry:.6f} 0.0 {s[0]:.6f} {s[1]:.6f} {s[2]:.6f}")
+        text = "\n".join(lines) + "\n"
+        if path:
+            with open(path, "w") as f:
+                f.write(text)
+        return text
+
     def topological_charge(self):
         """三角格/六角格上的离散 skyrmion 数（周期性边界）。
 
