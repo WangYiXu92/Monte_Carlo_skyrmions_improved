@@ -507,6 +507,178 @@ class MonteCarlo2D:
 
         return T_list, B_list, S, dS_M, C, dT_ad
 
+    def magnetic_structure_analysis(self, q_threshold=0.30, m_fm_threshold=0.85):
+        """自动识别当前自旋构型的磁结构，并提取磁性单胞。
+
+        流程：
+          1. 平均磁化 |m| —— |m| > m_fm_threshold → FM（单胞 1×1）
+          2. S(q) 峰检测（排除 Γ）——无峰 → PM
+          3. 分类：单 q* → AFM（半格点 q）/ helical（任意 q）；
+             多 q* 且拓扑荷 Q ≠ 0 → skyrmion_lattice；多 q* 且 Q ≈ 0 → multi-q
+          4. 磁单胞提取：求所有满足 q*·R ∈ ℤ 的最小线性无关格点
+             R = (m,n)（即磁平移对称性），构造单胞基矢矩阵并抽取单胞自旋。
+
+        返回 dict：
+          order          : 'FM' | 'AFM' | 'helical' | 'skyrmion_lattice' | 'multi-q' | 'PM'
+          magnetization  : |m|（归一化）
+          q_stars        : 分数坐标 q* 列表（不含 ± 重复，不含 Γ）
+          top_charge     : 拓扑荷 Q（skyrmion 检测）
+          cell_matrix    : 磁单胞基矢 [[m1,n1],[m2,n2]]（超胞格点坐标）
+          cell_spins     : (N1, N2, Nb, 3) 单胞内自旋构型
+          cell_repeats   : 超胞 = cell_repeats[0]×cell_repeats[1] 个磁单胞
+        """
+        Nx, Ny, Nb, _ = self.spins.shape
+        m_norm, _ = self.get_magnetization()
+        q1, q2, S = self.spin_structure_factor()
+        Q = 0.0
+        # 长程有序判据：峰强度须显著高于背景（随机/热噪声无此特征）
+        S_med = np.median(S)
+        ordered = S.max() > 5.0 * S_med
+
+        # --- 1. 峰检测（3×3 邻域极大，排除 Γ；需满足长程有序判据）---
+        Smax = S.max()
+        peaks = []
+        if ordered:
+            for i in range(Nx):
+                for j in range(Ny):
+                    if i == 0 and j == 0:
+                        continue
+                    s = S[i, j]
+                    if s < q_threshold * Smax:
+                        continue
+                    # 3×3 邻域极大（PBC）
+                    if all(s >= S[(i+di) % Nx, (j+dj) % Ny]
+                           for di in (-1, 0, 1) for dj in (-1, 0, 1)
+                           if not (di == 0 and dj == 0)):
+                        peaks.append((i, j))
+        # 去除 ±q 重复（保留一半）
+        def canon(i, j):
+            # 规范化到 [0, Nx)×[0, Ny) 的 q 对：取 (i,j) 与 (-i,-j) 的字典序较小者
+            return min((i % Nx, j % Ny), ((-i) % Nx, (-j) % Ny))
+        q_stars = []
+        seen = set()
+        for i, j in peaks:
+            c = canon(i, j)
+            if c not in seen:
+                seen.add(c)
+                q_stars.append(c)
+        q_stars.sort()
+
+        # --- 2. 分类 ---
+        if m_norm > m_fm_threshold:
+            order = "FM"
+        elif not ordered:
+            order = "PM"
+        else:
+            try:
+                Q = self.topological_charge()
+            except NotImplementedError:
+                pass
+            half_grid = lambda i, j: (2*i % Nx == 0) and (2*j % Ny == 0)
+            if len(q_stars) == 1:
+                i, j = q_stars[0]
+                order = "AFM" if half_grid(i, j) else "helical"
+            else:
+                order = "skyrmion_lattice" if abs(Q) > 0.3 else "multi-q"
+
+        # --- 3. 磁单胞提取（q*·R ∈ ℤ 的所有 R 的子格）---
+        cell_matrix, cell_spins, nrep = self._extract_magnetic_cell(q_stars, order)
+
+        return {
+            "order": order,
+            "magnetization": m_norm,
+            "q_stars": q_stars,
+            "top_charge": Q if order in ("skyrmion_lattice", "multi-q") else 0.0,
+            "cell_matrix": cell_matrix,
+            "cell_spins": cell_spins,
+            "cell_repeats": nrep,
+        }
+
+    def _extract_magnetic_cell(self, q_stars, order):
+        """从 q* 构造磁单胞：解 i·m·Ny + j·n·Nx ≡ 0 (mod Nx·Ny)（对所有峰）。"""
+        Nx, Ny, Nb, _ = self.spins.shape
+        if order == "FM" or not q_stars:
+            # 单胞 = 1×1（FM）或整超胞（PM 无周期，返回整胞）
+            if order == "FM":
+                return [[1, 0], [0, 1]], self.spins[:1, :1].copy(), Nx * Ny
+            return [[Nx, 0], [0, Ny]], self.spins.copy(), 1
+        L = Nx * Ny
+        mods = []
+        for (i, j) in q_stars:
+            mods.append(((i * Ny) % L, (j * Nx) % L))
+        # 收集所有满足同余条件的 R=(m,n)，按范数排序 → 最短线性无关对
+        sols = []
+        rng_m = range(1, max(Nx, Ny) + 1)
+        rng_n = range(-max(Nx, Ny), max(Nx, Ny) + 1)
+        for m in rng_m:
+            for n in rng_n:
+                if all((a * m + b * n) % L == 0 for (a, b) in mods):
+                    sols.append((m, n))
+        if len(sols) < 2:
+            # 兜底：对角超胞（每峰分母 lcm）
+            from math import gcd
+            d1 = d2 = 1
+            for (i, j) in q_stars:
+                if i:
+                    d1 = d1 * (Nx // gcd(i, Nx)) // gcd(d1, Nx // gcd(i, Nx))
+                if j:
+                    d2 = d2 * (Ny // gcd(j, Ny)) // gcd(d2, Ny // gcd(j, Ny))
+            sols = [(d1, 0), (0, d2)]
+        sols.sort(key=lambda v: abs(v[0]) + abs(v[1]))
+        basis = [sols[0]]
+        for v in sols[1:]:
+            if all(v[0]*w[1] - v[1]*w[0] != 0 for w in basis):
+                basis.append(v)
+            if len(basis) >= 2:
+                break
+        # LLL 约化（2D 简化版：使基矢变短、近正交）
+        v1 = np.array(basis[0], dtype=int)
+        v2 = np.array(basis[1], dtype=int)
+        for _ in range(16):
+            # 用 v2 修正 v1
+            mu = round(np.dot(v1, v2) / np.dot(v2, v2))
+            if mu != 0:
+                v1 = v1 - mu * v2
+            # 交换使 |v1| ≤ |v2|
+            if np.dot(v1, v1) > np.dot(v2, v2):
+                v1, v2 = v2, v1
+            if all(v == 0 for v in (v1[0], v1[1])):
+                v1 = np.array([1, 0])
+            if all(v == 0 for v in (v2[0], v2[1])):
+                v2 = np.array([0, 1])
+        (m1, n1), (m2, n2) = tuple(v1), tuple(v2)
+        # 单胞格点数与超胞内单胞重复数
+        det = abs(m1 * n2 - n1 * m2)
+        nrep = (Nx * Ny) // max(1, det) if det else 1
+        # 单胞格点 = 超胞格点按磁平移等价类（ΔR 满足所有 q*·ΔR ∈ ℤ）分组的代表元
+        classes = {}   # rep -> [members]
+        reps = []
+        for x in range(Nx):
+            for y in range(Ny):
+                rep = None
+                for r0 in reps:
+                    dx, dy = x - r0[0], y - r0[1]
+                    if all((a*dx + b*dy) % L == 0 for (a, b) in mods):
+                        rep = r0
+                        break
+                if rep is None:
+                    reps.append((x, y))
+                    classes[(x, y)] = [(x, y)]
+                else:
+                    classes[rep].append((x, y))
+        uniq = sorted(classes.keys())   # 每类取最小字典序代表
+        if not uniq:
+            uniq = [(0, 0)]
+        cell = np.array([self.spins[x, y] for (x, y) in uniq])  # (ncell, Nb, 3)
+        # 重排为网格形状（近似方阵）
+        ncell = len(uniq)
+        nx = int(round(np.sqrt(ncell)))
+        ny = (ncell + nx - 1) // nx
+        grid = np.zeros((nx, ny, Nb, 3))
+        for k in range(ncell):
+            grid[k // ny, k % ny] = cell[k]
+        return [[m1, n1], [m2, n2]], grid, nrep
+
     def topological_charge(self):
         """三角格/六角格上的离散 skyrmion 数（周期性边界）。
 
@@ -541,7 +713,14 @@ class MonteCarlo2D:
         B_field: Tesla
         """
         print(f"--- Numba: Skyrmion 退火模拟 (B={B_field} Tesla) ---")
-        self.ham.B_field_meV = np.array(B_field, dtype=np.float64) * MU_S_MEV_PER_T
+        B = np.atleast_1d(np.asarray(B_field, dtype=np.float64))
+        if B.size == 1:
+            B = np.array([0.0, 0.0, B[0]])     # 标量 → 沿 z
+        elif B.size == 3:
+            B = B
+        else:
+            raise ValueError("B_field 应为标量（沿 z）或 3 分量矢量")
+        self.ham.B_field_meV = B * MU_S_MEV_PER_T
 
         T = T_init
         cooling_rate = 0.9

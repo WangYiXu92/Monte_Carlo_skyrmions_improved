@@ -13,6 +13,7 @@
 4. **Magnetocaloric (MCE)**：多场温度扫描 → ΔS_M(T)（麦克斯韦关系）+ ΔT_ad(T)（绝热温变）
 5. **Spin structure factor S(q)**：自旋构型 FFT → 识别磁序（FM q=0 峰 / 螺旋 q* / skyrmion 晶格 Bragg 峰）
 6. **Magnon spectra**：共线 FM 线性自旋波（HP 一阶）色散 ω(k)（多子格、各向异性隙、Zeeman 隙）
+7. **Magnetic structure analysis**：自动识别磁序（FM/AFM/helical/skyrmion/PM）+ 提取磁性单胞（q* → 磁平移 → 商空间）
 
 ## 模型
 
@@ -74,6 +75,24 @@ ks, omega = mc.magnon_spectrum(kpath, S=1.5, B_field=(0,0,0))  # meV
 - **已校准**：1D 4-环 S=1..3 精确对角化——k=π/2 精确匹配；k=π 处 0.75/0.875/0.917 = 1/(2S) 量子修正收敛（LSWT 是经典极限）
 - **限制**：仅共线 FM；DMI（反对称 J）忽略（基态倾斜，需非共线 LSWT）；AFM/非共线不支持
 - 示例：`cd MCE_demo && python3 magnon_demo.py` → magnon_band.png（honeycomb CrI3 双带：Γ 隙 1.5 meV = 2S|A|）
+
+### 磁结构自动识别 + 磁单胞提取
+
+```python
+r = mc.magnetic_structure_analysis()
+# r['order']       : 'FM' | 'AFM' | 'helical' | 'skyrmion_lattice' | 'multi-q' | 'PM'
+# r['q_stars']     : 磁传播矢量 q*（S(q) 峰，分数坐标）
+# r['top_charge']  : 拓扑荷 Q（skyrmion 检测）
+# r['cell_matrix'] : 磁单胞基矢（超胞格点坐标）
+# r['cell_spins']  : 单胞内自旋构型 (N1, N2, Nb, 3)
+# r['cell_repeats']: 超胞内含磁单胞数
+```
+
+- **原理**：S(q) 峰 → q*（磁传播矢量）；磁单胞 = 满足 q*·R ∈ ℤ 的所有磁平移 R 的等价类代表元（商空间）
+- **验证**：五类构型全部通过——FM（1×1）、checkerboard AFM（2 格点 [+1,−1]）、螺旋 q=(1/4,0)（4 态 [1,0,−1,0]）、skyrmion 晶格（12×12 单胞, Q=±16 精确）、随机 → PM
+- **端到端**：真实 MC 退火（48×48, B=0.15T）出 Q=−1 skyrmion 自动识别 ✓
+- 示例：`cd MCE_demo && python3 analyze_magnetic_demo.py`
+- 注意：单个（非晶格）skyrmion 无晶格周期 → 无 q* 峰、单胞=整胞（Q 仍是判别键）
 
 ### 多 seed 并行（统计误差估计）
 
