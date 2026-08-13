@@ -323,14 +323,14 @@ class MonteCarlo2D:
         物理（经典连续自旋，k_B=1）：
           ΔS_M(T,ΔB) = ∫₀^{ΔB} (∂M/∂T)_{B'} dB'     （麦克斯韦关系，主算法）
           S(T,B) = ln(4π) − ∫₀^{β} (E−E₀) dβ' + β(E−E₀)  （绝对熵，附；低 T 平衡不足时不可靠）
-          ΔT_ad(T) = −T·ΔS_M(T)/C(T)                 （绝热温变，>0）
+          ΔT_ad(T₁) = T₂ − T₁，其中 S(T₂,B) = S(T₁,0)   （等熵构造，严格）
           C(T) = Var(E)/(k_B T²)                      （涨落公式）
 
         返回 (T_grid, B_list, S_matrix, dS_M, C_matrix, dT_ad)：
           S_matrix[nT, nB]   每自旋绝对熵（k_B 单位；低 T 仅供参考）
           dS_M[nT, nB-1]     列 j = S(T,B_{j+1}) − S(T,0)（麦克斯韦关系）
           C_matrix[nT, nB]   每自旋热容（k_B 单位）
-          dT_ad[nT, nB-1]    −T·ΔS_M/C(T, B_avg)  [K]
+          dT_ad[nT, nB-1]    列 j = ΔT_ad 相对 B=0（等熵构造 S(T₂,B)=S(T₁,0)；无解为 NaN）
         """
         import numpy as np
         T_list = np.asarray(T_list, float)
@@ -418,13 +418,21 @@ class MonteCarlo2D:
         inv = np.argsort(T_asc)
         dS_M = dS_M[inv]
 
-        # ---- ΔT_ad ----
-        dB = np.diff(B_list)
-        # C 对 T 做 3 点滑动平均（涨落噪声会放大到 ΔT_ad）
-        C_smooth = np.vstack([C[0], 0.5*(C[:-1]+C[1:]), C[-1]])
-        C_smooth = 0.5*(C_smooth[:-1] + C_smooth[1:])
-        C_avg = 0.5 * (C_smooth[:, 1:] + C_smooth[:, :-1])
-        dT_ad = -T_list[:, None] * dS_M / np.maximum(C_avg, 1e-12)
+        # ---- ΔT_ad：等熵构造（严格）----
+        # 绝热加场 B：S(T₂, B) = S(T₁, 0) → ΔT_ad = T₂ − T₁
+        # 从绝对熵曲线反插值（比近似 −T·ΔS_M/C 精确，不受 C 噪声影响）。
+        T_asc2 = np.argsort(T_list)
+        Ta2 = T_list[T_asc2]
+        Sa2 = S[T_asc2]                          # S 随 T 单调增
+        dT_ad = np.full((nT, nB - 1), np.nan)
+        for j in range(nB - 1):
+            for i in range(nT):
+                s0 = Sa2[i, 0]
+                if Sa2[0, j + 1] <= s0 <= Sa2[-1, j + 1]:
+                    T2 = np.interp(s0, Sa2[:, j + 1], Ta2)
+                    dT_ad[i, j] = T2 - Ta2[i]
+        inv2 = np.argsort(T_asc2)
+        dT_ad = dT_ad[inv2]
 
         if output_file is not None:
             with open(output_file, "w") as f:

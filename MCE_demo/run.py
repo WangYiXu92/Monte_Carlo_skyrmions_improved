@@ -65,4 +65,8 @@ if __name__ == "__main__":
         print(f"{T[i]:5.1f}   {dS_M[i, i6-1]:+10.4f}          {dT_ad[i, i6-1]:+8.2f}        {C[i, 0]:7.4f}")
     i_pk = np.argmin(dS_M[:, i6-1])
     print(f"\n|ΔS_M| 峰值: T = {T[i_pk]:.1f} K, ΔS_M = {dS_M[i_pk, i6-1]:.4f} kB/spin (0→6 T)")
-    print(f"ΔT_ad 峰值: T = {T[np.argmax(dT_ad[:, i6-1])]:.1f} K, ΔT_ad = {dT_ad[np.argmax(dT_ad[:, i6-1]), i6-1]:.2f} K")
+    if np.all(np.isnan(dT_ad[:, i6-1])):
+        print("ΔT_ad: 无等熵解（绝对熵曲线未覆盖所需范围）")
+    else:
+        ipk2 = np.nanargmax(dT_ad[:, i6-1])
+        print(f"ΔT_ad 峰值(等熵法): T = {T[ipk2]:.1f} K, ΔT_ad = {dT_ad[ipk2, i6-1]:.2f} K")
