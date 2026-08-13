@@ -145,6 +145,61 @@ mc.export_xyz("traj.xyz", trajectory=traj, spin_scale=1.0)          # 动力学�
 - 每原子 3 列 = 自旋矢量 × spin_scale（OVITO Vector 属性）
 - 已验证：单帧 36 原子 |spin|=2.0 处处、多帧 10 帧结构正确
 
+### B-T 磁相图扫描（B–T phase diagram）
+
+```python
+res = mc.run_phase_diagram(
+    B_list=[0.0, 0.5, 1.0, 2.0], T_list=[5, 20, 40, 80, 150, 200],
+    equip_steps=500, calc_steps=250, sample_interval=10,
+    protocol="cooling", classify=True, output_file="phase.csv")
+# res['phases'] : (len(B), len(T)) 相标签（FM/AFM/helical/skyrmion_lattice/multi-q/PM）
+# res['M'], res['Q'], res['n_sk'] : 同形状数值数组
+```
+
+- **协议三选一**：`cooling`（field-cooled，逐 T 降温 warm start——skyrmion 口袋最易出现）、`heating`（ZFC-like，滞后对照）、`fresh`（每点独立随机态，无记忆）
+- 相标签 = `magnetic_structure_analysis` 分类，skyrmion 计数（n_sk≥1 且 Q≠0）优先覆盖 S(q) 标签
+- ⚠️ 滞后警告：相边界依赖冷却/加热路径（亚稳态卡滞是真实物理）；生产扫描请加长 equip_steps 或配合 Parallel Tempering
+- 示例：`PhaseDiagram_demo/phase_diagram_J10.csv/png`（J=−10/D=1.45/A=0.04，24×24，6×11 网格，B=1T 低温 skyrmion 口袋可见）
+
+### Skyrmion 扩散 + 寿命（动力学可观测量）
+
+```python
+traj, times = mc.run_spin_dynamics(dt=..., n_steps=..., T=..., damping=0.05)
+res = mc.skyrmion_diffusion(traj, times)     # 质心轨迹 → MSD → D（Einstein 4Dt）
+t, N, N0, tau, R2 = mc.skyrmion_lifetime(traj, times)   # N(t) 指数衰减 → τ
+eb = mc.arrhenius_analysis(T_list, tau_list) # ln τ vs 1/T → 湮灭势垒 E_b (meV)
+```
+
+- **扩散**：逐帧 `skyrmion_positions` → PBC 最小镜像配对 → MSD(τ) → 前 1/3 线性段 Einstein D
+- **寿命**：N(t) log 线性拟合（非指数段自动拒绝）；**Arrhenius**：τ(T)=τ₀exp(E_b/k_BT)
+- ⚠️ 需要**真实 skyrmion 构型**作起点（MC 退火生成或实验构型）；三角格解析 ansatz 离散化后局部 Q 不足（~0.3），会检测碎片化——合成轨迹验证 MSD 数学链可用（demo 见 `SkyrmionDynamics_demo/`）
+
+### Parallel Tempering（副本交换 MC）
+
+```python
+res = mc.run_parallel_tempering(
+    T_list=[3, 6, 12, 24, 48, 96], equip_steps=80, swap_interval=30,
+    n_swaps=15, B_field=(0,0,1), seed=42)
+# res['spins_final'] : 各副本最终构型；res['E_hist'] : 最低温副本能量轨迹
+# res['acc_rate']    : 相邻副本对交换接受率
+```
+
+- 标准副本交换：本地 Metropolis + 相邻温度副本交换（Metropolis 判据），奇偶轮交替；walker 温度跟踪；交换决策用独立 RNG（可复现）
+- **用途**：克服亚稳态/势垒卡滞（如 skyrmion 相退火失败时）；副本温度间距建议几何分布、目标接受率 10–30%（过宽 → 接受率≈0 退化为并行独立链）
+- 验证：16×16 随机起点 6 副本 15 轮 → 低温副本能量 −22700 → −30655（基态），接受率 0.10/0.13/0.10
+
+### S(q,ω) 峰位/线宽提取（磁振子色散 + 阻尼）
+
+```python
+qs, omega, S = mc.dynamic_structure_factor(traj, times, q_grid=[(1,0),(2,0),(3,0)])
+res = mc.sqw_peak_extraction(S, omega, q_grid, fit="lorentzian")
+# res['omega_peak'] : 峰位 ω(q)；res['FWHM'] : 线宽；res['R2'] : 拟合优度
+```
+
+- Lorentzian（阻尼磁振子线型，FWHM=2Γ）或 Gaussian 拟合；基线 = 最低 20% 分位中位数
+- **验证**：12×12 FM J=−10 与 LSWT 对照 ν=|J|Σ₃(1−cos 2πq·δ)/(2π)，五 q 点比值 0.91–0.99（与动力学验证 0.97–1.08 同源）
+- ⚠️ 单位：rfftfreq 给出**循环频率** ν（= ω_meV/2π）；Σ 取 3 个正 NN 方向（± 对称）
+
 ### 多 seed 并行（统计误差估计）
 
 ```python
