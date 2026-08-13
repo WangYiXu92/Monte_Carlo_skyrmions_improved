@@ -17,7 +17,9 @@
 H = Σ_<ij> S_i J_ij S_j + Σ_i A_i (S_iz)² − Σ_i μ_s B·S_i
 ```
 
-- J_ij 是 3×3 矩阵：对称部分 = 各向同性交换，反对称部分 = DMI（d 矢量 = D·ẑ×r̂，界面型）
+- J_ij 是 3×3 矩阵：对称部分 = 各向同性交换，反对称部分 = DMI
+- **DMI 约定：轴向矢量 d = D·(ẑ×r̂)**（文献标准界面型，D>0 = 正手性 Néel skyrmion）
+  （已验证三个例子的矩阵均满足此约定——root/MX2/AFM_honeycomb 原版即正确）
 - J < 0 铁磁，J > 0 反铁磁；A < 0 易 z 轴
 - 单位：能量 meV，温度 K（k_B = 0.08617333262 meV/K），磁场 Tesla（μ_s = gμ_B·S = 0.1157676 meV/T, g=2, S=1）
 - 任意 2D 晶格：输入晶格基矢 + 分数坐标 basis（多原子支持）+ bond 列表 [i, j, offset]
@@ -55,6 +57,10 @@ mean, std, all_res = run_curie_temperature_seeds(
 5. **多 seed 并行**：`run_curie_temperature_seeds()` 多进程并行，输出 M/χ 的 mean±std（统计误差）
 6. **拓扑数注释**：明确 Berg–Lüscher NN 三角形剖分（三角格上菱形劈两个 NN 三角形，原实现即正确）
 7. **AFM_honeycomb 注释修正**：J=+10 是反铁磁（原文注释误写"铁磁"）
+8. **DMI 约定确认**：三例子矩阵均满足 d = D·(ẑ×r̂)（文献约定），无需修改。⚠️ 物理观察：90×90 大格退火容易陷进负手性多 skyrmion 亚稳态（实测 Q=−2/−3/−4，B=1T 场能 0.116 meV 太弱不足以选择涡旋方向 → 手性近简并）；30×30 小格稳定出 Q=+1。模拟 skyrmion 晶格建议用更强的 B 或 field-cooling
+9. **CrI3 例子平衡修复**：heating 扫描低 T 从随机初态弛豫极慢（M(1K)≈0.2 伪值）→ 改 cooling 扫描（100→1K）+ 30×30 + 5000 sweeps/T（实测 Tc≈37 K）
+10. **MX2 磁滞物理修复**：原版 J=−8/A=−0.05 场翻不动且太软（无磁滞）→ J=−0.5/A=−1.5/T=2K（Ising 型成核翻转，实测矫顽场 ~15 T）
+11. **skyrmion 退火加长**：steps_per_T 2000→4000（90×90 淬火过快冻结亚稳态）
 
 ## 已知限制
 
