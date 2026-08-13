@@ -7,3 +7,8 @@ hysteresis_loop.txt
 __pycache__/
 *.pyc
 mce_results.txt
+
+# LOPOSTER 交换参数导入器 — 内部工具，绝对不发布（用户 2026-08-13 明确禁止公开）
+loposter_import.py
+loposter_import_test.py
+loposter_bridge/
