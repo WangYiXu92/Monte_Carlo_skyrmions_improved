@@ -914,6 +914,121 @@ class MonteCarlo2D:
                     f.write(f"{T:.4f} {m:.4f} {s:.4f}\n")
         return ([o[0] for o in out], [o[1] for o in out], [o[2] for o in out])
 
+    def run_spin_dynamics(self, dt, n_steps, T, damping=0.1, save_interval=10,
+                          seed=None, output_prefix=None):
+        """Langevin 自旋动力学（经典 LLG + 热噪声，Heun 积分）。
+
+        运动方程（原子单位制，每步时间 dt·ℏ/J）：
+          ∂S_i/∂t = −γ' S_i × (H_eff,i + ξ_i) − λ S_i × (S_i × H_eff,i)
+          H_eff,i = −∂H/∂S_i（局域有效场，含交换/DMI/各向异性/外场）
+          热噪声 <ξ_iα(t) ξ_jβ(t')> = 2λ k_B T δ_ij δ_αβ δ(t−t')
+
+        用 Heun（二阶随机 Runge–Kutta）积分；每个保存间隔记录一帧自旋构型。
+        返回轨迹 spins_t (n_frames, Nx, Ny, Nb, 3) + 时间数组。
+        """
+        Nx, Ny, Nb, _ = self.spins.shape
+        if seed is not None:
+            rng = np.random.default_rng(seed)
+        else:
+            rng = self._rng
+        lam = damping
+        # 有效场（局域能量梯度，符号：H = −Σ S_i·h_i → h_i = −∂H/∂S_i）
+        # 用能量差分或解析梯度：这里用解析梯度（键展开）
+
+        def local_field():
+            """H_eff = −∂H/∂S：交换 −½ΣJ·S_j（bonds 双向存储，½ 修正同 total_energy），
+            各向异性 −2A·S_z ẑ，外场 +B。"""
+            h = np.zeros_like(self.spins)
+            for b in range(Nb):
+                for (nu, dx, dy, Jm) in self.ham.bonds[b]:
+                    # S(r+δ)：roll 负向 → spins[r-δ] 移位后位置 r 存 S(r+δ)
+                    S_sh = np.roll(self.spins, (-dx, -dy), axis=(0, 1))[:, :, nu]
+                    h[:, :, b] -= 0.5 * (S_sh @ Jm.T)
+            for b in range(Nb):
+                h[:, :, b, 2] -= 2.0 * self.ham.A[b] * self.spins[:, :, b, 2]
+                h[:, :, b] += self.ham.B_field_meV
+            return h
+
+        def heun_step(S0, h, dt, T, lam):
+            """Heun 一步。S0 可能与 self.spins 同一引用——必须先拷贝，
+            否则 self.spins[:] = S1 会污染 S0，导致 k1 与 S1 不匹配（历史爆炸根因）。"""
+            S = S0.copy()
+            # 热噪声场
+            xi = rng.standard_normal(S.shape) * np.sqrt(2.0 * lam * T / dt)
+            # k1 = dS/dt
+            SxH = np.cross(S, h + xi)
+            k1 = -SxH - lam * np.cross(S, SxH)
+            S1 = S + dt * k1
+            S1 = S1 / np.linalg.norm(S1, axis=-1, keepdims=True)
+            # 重算场
+            self.spins[:] = S1
+            h1 = local_field()
+            xi1 = rng.standard_normal(S.shape) * np.sqrt(2.0 * lam * T / dt)
+            SxH1 = np.cross(S1, h1 + xi1)
+            k2 = -SxH1 - lam * np.cross(S1, SxH1)
+            S_new = S + 0.5 * dt * (k1 + k2)
+            S_new = S_new / np.linalg.norm(S_new, axis=-1, keepdims=True)
+            return S_new
+
+        frames, times = [], []
+        for step in range(n_steps):
+            h = local_field()
+            self.spins[:] = heun_step(self.spins, h, dt, T, lam)
+            if step % save_interval == 0:
+                frames.append(self.spins.copy())
+                times.append(step * dt)
+        if output_prefix:
+            arr = np.stack(frames)
+            np.save(f"{output_prefix}_traj.npy", arr)
+            np.savetxt(f"{output_prefix}_times.txt", np.array(times))
+        return np.stack(frames), np.array(times)
+
+    def dynamic_structure_factor(self, traj, times, q_grid=None, t_max=None):
+        """动力学结构因子 S(q,ω)（经典，从自旋轨迹）。
+
+        S(q,ω) = (1/2π)∫dt e^{iωt} ⟨S_q(t)·S_{−q}(0)⟩
+
+        traj  : (n_frames, Nx, Ny, Nb, 3) 动力学轨迹（run_spin_dynamics 输出）
+        times : 帧时间数组
+        q_grid: 采样 q 点（分数坐标列表）；None → 全网格降采样（stride 4）
+        t_max : 相关时间截断（帧数）；None → 全轨迹
+
+        返回 (q_list, omega, S) —— S[n_q, n_omega]。
+        """
+        n_frames, Nx, Ny, Nb, _ = traj.shape
+        if t_max is not None:
+            n_frames = min(n_frames, t_max)
+        if q_grid is None:
+            stride = max(1, Nx // 8)
+            q_grid = [(i, j) for i in range(0, Nx, stride) for j in range(0, Ny, stride)]
+        dt = times[1] - times[0] if len(times) > 1 else 1.0
+
+        # S_q(t) = Σ_r S(r,t) e^{iq·r}（q_grid 为整数索引，实际 q = (qx/Nx, qy/Ny)）
+        Sqt = np.zeros((len(q_grid), n_frames, 3), dtype=complex)
+        for a, (qx, qy) in enumerate(q_grid):
+            ph = np.exp(-2j*np.pi*(qx*np.arange(Nx)[:, None]/Nx + qy*np.arange(Ny)[None, :]/Ny))
+            for t in range(n_frames):
+                for comp in range(3):
+                    Sqt[a, t, comp] = np.sum(traj[t, :, :, 0, comp] * ph)
+
+        # 自相关 C(q,τ) = ⟨S_q(t+τ)·S_{−q}(t)⟩_t（FFT 法）
+        n_f = n_frames // 2
+        C = np.zeros((len(q_grid), n_f), dtype=complex)
+        for a in range(len(q_grid)):
+            F = Sqt[a]                      # (n_frames, 3)
+            # 自相关 via FFT（每分量）
+            for comp in range(3):
+                x = F[:, comp]
+                ac = np.fft.ifft(np.fft.fft(x) * np.conj(np.fft.fft(x))) / n_frames
+                C[a] += ac[:n_f]
+
+        # 时间 → 频率：S(q,ω) = 2∫₀^T Re[C(τ)] cos(ωτ) dτ
+        omega = np.fft.rfftfreq(n_f, d=dt)
+        S = np.zeros((len(q_grid), len(omega)))
+        for a in range(len(q_grid)):
+            S[a] = np.fft.rfft(C[a].real).real * dt
+        return q_grid, omega, S
+
     def topological_charge(self):
         """三角格/六角格上的离散 skyrmion 数（周期性边界）。
 

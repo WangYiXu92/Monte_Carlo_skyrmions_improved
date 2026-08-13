@@ -120,6 +120,20 @@ Ts, Ns, Nstd = mc.skyrmion_stability(T_list, equip_steps, calc_steps)  # 熔化�
 - ⚠️ 物理窗口：D/J 太弱（<0.06）时 skyrmion 晶格不是哈密顿量稳定态，构造晶格一加热即湮灭（小 λ 势垒低）；稳定曲线需 D/J ≳ 0.1 + 合适 B
 - 示例：`cd MCE_demo && python3 skyrmion_analysis_demo.py` → skyrmion_stability.png
 
+### Langevin 自旋动力学 + S(q,ω) 动态结构因子（INS 对接）
+
+```python
+traj, times = mc.run_spin_dynamics(dt=0.002, n_steps=40000, T=0.3,
+                                   damping=0.05, save_interval=10)   # Heun 积分
+qs, omega, S = mc.dynamic_structure_factor(traj, times, q_grid=[(4,0), ...])
+```
+
+- **LLG + 热噪声（Langevin）**：∂S/∂t = −S×H_eff − λS×(S×H_eff) + 噪声（<ξξ'> = 2λk_BTδ），Heun 二阶积分
+- **验证**：① 无耗散 λ=0/T=0 能量守恒 0.0003%（2000 步）；② **S(q,ω) 峰位 vs LSWT 理论 0.97-1.08**（12×12 FM 四 q 点）；demo 24×24 平均偏差 6%
+- **S(q,ω) = ∫dt e^{iωt}⟨S_q(t)·S_{−q}(0)⟩**——直接对应非弹性中子散射（INS）截面
+- ⚠️ 稳定性要求：dt·ω_max ≲ 0.15（ω_max = S·z·|J| 量级）；Heun 需 `S0.copy()` 防引用污染（历史爆炸根因）
+- 示例：`cd MCE_demo && python3 spin_dynamics_demo.py` → sw_spectrum.png（S(q,ω) 强度图 + LSWT 色散线叠加）
+
 ### 多 seed 并行（统计误差估计）
 
 ```python
