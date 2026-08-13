@@ -1071,6 +1071,245 @@ class MonteCarlo2D:
             np.savetxt(f"{output_prefix}_times.txt", np.array(times))
         return np.stack(frames), np.array(times)
 
+    def skyrmion_diffusion(self, traj, times, match_cutoff=3.0, min_track=2):
+        """从动力学轨迹提取 skyrmion 质心轨迹 → MSD → 扩散系数 D。
+
+        Parameters
+        ----------
+        traj : (n_frames, Nx, Ny, Nb, 3) 动力学轨迹（run_spin_dynamics 返回）。
+        times : (n_frames,) 时间数组（相同时间单位）。
+        match_cutoff : 相邻帧中心配对的最大位移（格点单位，PBC 最小镜像）。
+        min_track : 参与 MSD 的最短存活帧数（排除瞬态噪声）。
+
+        Returns
+        -------
+        dict:
+            tracks   : 每条 skyrmion 轨迹 (n_track, 2) 格点坐标列表（存活帧序列）
+            msd      : MSD(τ) 数组（对 τ 的所有起点平均）
+            tau      : 对应 τ 数组
+            D, D_err : 扩散系数（格点²/时间单位）与拟合误差（线性拟合前 1/3 τ）
+            n_tracks : 追踪到的轨迹数
+        """
+        Nx, Ny = self.lat.Nx, self.lat.Ny
+        centers = []
+        for f in range(len(traj)):
+            self.spins[:] = traj[f]
+            pos = self.skyrmion_positions()
+            centers.append(pos)
+        # 相邻帧配对（PBC 最小镜像差）
+        tracks = []          # 每条 = [(frame, x, y), ...]
+        for f in range(1, len(centers)):
+            prev = centers[f - 1]
+            curr = centers[f]
+            used = [False] * len(curr)
+            for pi, (x0, y0, _q0) in enumerate(prev):
+                best, bj, bd = None, -1, 1e9
+                for j, (x1, y1, _q1) in enumerate(curr):
+                    if used[j]:
+                        continue
+                    dx = min(abs(x1 - x0), Nx - abs(x1 - x0))
+                    dy = min(abs(y1 - y0), Ny - abs(y1 - y0))
+                    d = np.hypot(dx, dy)
+                    if d < bd:
+                        best, bj, bd = (x1, y1), j, d
+                if best is not None and bd <= match_cutoff:
+                    used[bj] = True
+                    # 接到已有轨迹或开新轨迹
+                    hit = None
+                    for tr in tracks:
+                        if tr[-1][0] == f - 1 and tr[-1][1] == x0 and tr[-1][2] == y0:
+                            hit = tr
+                            break
+                    if hit is None:
+                        hit = [(f - 1, x0, y0)]
+                        tracks.append(hit)
+                    hit.append((f, best[0], best[1]))
+        tracks = [tr for tr in tracks if len(tr) >= min_track]
+        # MSD(τ)：所有帧对（PBC 最小差）
+        tau_max = min(len(times), 25)
+        msd = np.zeros(tau_max)
+        tau = np.zeros(tau_max)
+        cnt = np.zeros(tau_max)
+        for tr in tracks:
+            for i in range(len(tr)):
+                for j in range(i + 1, min(i + tau_max, len(tr))):
+                    dtau = tr[j][0] - tr[i][0]
+                    if dtau >= tau_max:
+                        break
+                    dx = tr[j][1] - tr[i][1]
+                    dy = tr[j][2] - tr[i][2]
+                    dx = min(abs(dx), Nx - abs(dx))
+                    dy = min(abs(dy), Ny - abs(dy))
+                    msd[dtau] += dx * dx + dy * dy
+                    tau[dtau] = times[tr[j][0]] - times[tr[i][0]]
+                    cnt[dtau] += 1
+        m = cnt > 0
+        msd = msd[m] / np.maximum(cnt[m], 1)
+        tau = tau[m]
+        # Einstein: MSD = 4Dt（2D）——用前 1/3 线性段拟合
+        nfit = max(2, len(msd) // 3)
+        if nfit >= 2 and len(msd) >= 2:
+            A = np.polyfit(tau[:nfit], msd[:nfit], 1)
+            D, D_err = A[0] / 4.0, 0.0
+            resid = msd[:nfit] - np.polyval(A, tau[:nfit])
+            D_err = np.sqrt(np.sum(resid ** 2) / max(1, nfit - 2)) / 4.0
+        else:
+            D, D_err = 0.0, 0.0
+        return {"tracks": tracks, "msd": msd, "tau": tau, "D": float(D),
+                "D_err": float(D_err), "n_tracks": len(tracks)}
+
+    def skyrmion_lifetime(self, traj, times, min_n=2):
+        """skyrmion 存活数 N(t) → 指数衰减拟合 → 寿命 τ。
+
+        对轨迹逐帧统计 skyrmion 数（用局部拓扑荷验证的核心计数），
+        拟合 N(t) = N0·exp(−t/τ)（log 线性最小二乘）。
+
+        Returns
+        -------
+        (t, N, N0, tau, R2) : 时间数组、存活数数组、初始数、寿命、拟合优度。
+        """
+        N = []
+        for f in range(len(traj)):
+            self.spins[:] = traj[f]
+            N.append(len(self.skyrmion_positions()))
+        t = np.asarray(times)
+        N = np.asarray(N, dtype=float)
+        mask = N > 0
+        if mask.sum() < 3:
+            return t, N, N[0], np.inf, 0.0
+        # log 线性拟合（N 的噪声在指数尺度上）
+        A = np.polyfit(t[mask], np.log(N[mask]), 1)
+        tau = -1.0 / A[0] if A[0] < 0 else np.inf
+        N0 = np.exp(A[1])
+        pred = N0 * np.exp(-t / tau) if np.isfinite(tau) else np.full_like(t, N0, dtype=float)
+        ss_res = np.sum((np.log(N[mask]) - np.log(pred[mask])) ** 2)
+        ss_tot = np.sum((np.log(N[mask]) - np.mean(np.log(N[mask]))) ** 2)
+        R2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        return t, N, N0, float(tau), float(R2)
+
+    def arrhenius_analysis(self, T_list, tau_list, output_file=None):
+        """Arrhenius 分析：ln τ vs 1/T → 湮灭势垒 E_b（meV）。
+
+        τ(T) = τ0·exp(E_b / k_B T) → ln τ = E_b/(k_B·T) + ln τ0。
+        返回 (E_b, ln_tau0, R2)。
+        """
+        T = np.asarray(T_list, dtype=float)
+        tau = np.asarray(tau_list, dtype=float)
+        fin = np.isfinite(tau) & (tau > 0)
+        if fin.sum() < 2:
+            raise ValueError("至少需要 2 个有限寿命数据点")
+        kB = 0.0861733  # meV/K
+        x, y = 1.0 / T[fin], np.log(tau[fin])
+        A = np.polyfit(x, y, 1)
+        E_b = A[0] * kB  # 斜率 = E_b/k_B → meV
+        pred = np.polyval(A, x)
+        ss_res = np.sum((y - pred) ** 2)
+        ss_tot = np.sum((y - np.mean(y)) ** 2)
+        R2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        if output_file:
+            with open(output_file, "w") as f:
+                f.write("# T(K) tau tau_fit\n")
+                for ti, tauv in zip(T[fin], tau[fin]):
+                    f.write(f"{ti:.4f} {tauv:.6e} {np.exp(np.polyval(A, 1.0/ti)):.6e}\n")
+        return {"E_b_meV": float(E_b), "ln_tau0": float(A[1]), "R2": float(R2)}
+
+    def run_parallel_tempering(self, T_list, equip_steps, swap_interval, n_swaps,
+                               B_field=(0.0, 0.0, 0.0), seed=None, verbose=True):
+        """Parallel Tempering（副本交换 MC）——克服亚稳态/势垒卡滞。
+
+        标准副本交换协议：
+          1. n_replicas 个副本，温度 T_list（升序），每副本独立 RNG + 独立 spins；
+          2. 本地演化：每副本跑 swap_interval 个 sweeps（Metropolis）；
+          3. 相邻副本 (i, i+1) 交换尝试：
+                 p = min(1, exp[(β_i − β_{i+1})(E_i − E_{i+1})]),
+                 β = 1/(k_B T)
+             接受则交换两副本的自旋构型；
+          4. 循环 n_swaps 轮。
+
+        高温暖副本翻越势垒 → 交换把高温构型“注入”低温副本，
+        低温副本因此能访问亚稳态以外的构型（如 skyrmion 相）。
+
+        Parameters
+        ----------
+        T_list : 副本温度（K，升序，最少 2 个）。
+        equip_steps : 交换前每副本本地平衡 sweeps。
+        swap_interval : 两次交换尝试之间的本地 sweeps。
+        n_swaps : 交换尝试轮数。
+        B_field : 外场（Tesla），应用到所有副本。
+        seed : 随机种子（各副本 RNG 从 seed+i 派生）。
+
+        Returns
+        -------
+        dict:
+            spins_final : (n_replicas, Nx, Ny, Nb, 3) 各副本最终构型
+            E_series    : (n_replicas, n_swaps+1) 每轮交换前能量（meV）
+            T_visits    : (n_replicas, n_swaps+1) 各副本实际访问温度
+            acc_rate    : (n_replicas-1,) 相邻副本对交换接受率
+            E_hist      : 最低温副本的最终能量（标量，用于与单链对照）
+        """
+        T_list = np.asarray(T_list, dtype=float)
+        if len(T_list) < 2:
+            raise ValueError("Parallel Tempering 至少需要 2 个副本温度")
+        if not np.all(np.diff(T_list) > 0):
+            raise ValueError("T_list 必须严格升序")
+        kB = 0.0861733  # meV/K
+        beta = 1.0 / (kB * T_list)          # 1/meV
+        n_rep = len(T_list)
+        Nx, Ny, Nb, _ = self.spins.shape
+        base_seed = seed if seed is not None else (getattr(self, "_seed", None) or 0)
+        rng_swap = np.random.default_rng(base_seed + 777)  # 交换决策专用 RNG
+
+        # 克隆副本：共享 lattice/hamiltonian 定义，独立 spins + RNG
+        reps = []
+        for r in range(n_rep):
+            mc = MonteCarlo2D(self.lat, self.ham, seed=(base_seed + 1000 * (r + 1)))
+            mc.spins = self.spins.copy() if r == 0 else None
+            reps.append(mc)
+        # 副本 0 用当前构型，其余用随机态
+        for r in range(1, n_rep):
+            reps[r].spins = reps[r]._random_spins()
+        for mc in reps:
+            mc.ham.B_field_meV = np.array(B_field, dtype=float) * MU_S_MEV_PER_T
+
+        # 预热
+        for r in range(n_rep):
+            for _ in range(equip_steps):
+                reps[r].mc_step(T_list[r])
+
+        E_series = np.zeros((n_rep, n_swaps + 1))
+        T_visits = np.zeros((n_rep, n_swaps + 1))
+        E_series[:, 0] = [reps[r].total_energy() for r in range(n_rep)]
+        T_visits[:, 0] = T_list
+        walker_T = list(T_list)              # walker r 当前实际温度
+        n_acc = np.zeros(n_rep - 1)
+
+        for s in range(n_swaps):
+            # 本地演化（各 walker 在其当前温度演化）
+            for r in range(n_rep):
+                for _ in range(swap_interval):
+                    reps[r].mc_step(walker_T[r])
+            # 相邻交换（奇偶交替，基于温度槽的 β 与槽内能量）
+            for parity in (0, 1):
+                for i in range(parity, n_rep - 1, 2):
+                    E_i, E_j = reps[i].total_energy(), reps[i + 1].total_energy()
+                    delta = (beta[i] - beta[i + 1]) * (E_i - E_j)
+                    if delta >= 0.0 or rng_swap.random() < np.exp(delta):
+                        reps[i].spins, reps[i + 1].spins = reps[i + 1].spins, reps[i].spins
+                        walker_T[i], walker_T[i + 1] = walker_T[i + 1], walker_T[i]
+                        n_acc[i] += 1
+            E_series[:, s + 1] = [reps[r].total_energy() for r in range(n_rep)]
+            T_visits[:, s + 1] = walker_T
+            if verbose and (s + 1) % max(1, n_swaps // 10) == 0:
+                acc = n_acc / ((s + 1) * 2.0)  # 奇偶两轮
+                print(f"PT sweep {s+1}/{n_swaps} | acc: "
+                      + " ".join(f"{a:.2f}" for a in acc))
+
+        spins_final = np.stack([reps[r].spins for r in range(n_rep)])
+        return {"spins_final": spins_final, "E_series": E_series,
+                "T_visits": T_visits,
+                "acc_rate": n_acc / (n_swaps * 2.0),
+                "E_hist": E_series[0]}
+
     def dynamic_structure_factor(self, traj, times, q_grid=None, t_max=None):
         """动力学结构因子 S(q,ω)（经典，从自旋轨迹）。
 
@@ -1116,6 +1355,99 @@ class MonteCarlo2D:
         for a in range(len(q_grid)):
             S[a] = np.fft.rfft(C[a].real).real * dt
         return q_grid, omega, S
+
+    def sqw_peak_extraction(self, S, omega, q_grid, q_indices=None, fit="lorentzian",
+                            verbose=True):
+        """S(q,ω) 峰位 + 线宽提取（磁振子色散与阻尼的直接可观测量）。
+
+        对每个选定 q：在 ω>0 区间定位谱峰（3 点局部极大），
+        用 Lorentzian（磁振子阻尼线型）或 Gaussian 拟合：
+            S(ω) = A·Γ² / ((ω−ω₀)² + Γ²)      [Lorentzian, FWHM = 2Γ]
+            S(ω) = A·exp(−(ω−ω₀)²/(2σ²))      [Gaussian,   FWHM = 2√(2ln2)·σ]
+        基线：S(ω) 最低 20% 分位中位数。
+
+        Parameters
+        ----------
+        S : (n_q, n_ω) 动态结构因子（dynamic_structure_factor 输出）。
+        omega : (n_ω,) 频率轴（时间单位⁻¹）。
+        q_grid : q 点列表（dynamic_structure_factor 返回的整数索引）。
+        q_indices : 要提取的 q 索引列表；None → 全部。
+        fit : 'lorentzian'（默认）| 'gaussian'。
+        verbose : 打印每 q 提取结果。
+
+        Returns
+        -------
+        dict:
+            q_frac     : (n,) 分数坐标 q = (qx/Nx, qy/Ny)
+            omega_peak : 峰位（ω 单位）
+            FWHM       : 线宽（ω 单位）
+            amp        : 峰高 A
+            R2         : 拟合优度
+        """
+        from scipy.optimize import curve_fit
+
+        if q_indices is None:
+            q_indices = list(range(len(q_grid)))
+        out = {"q_frac": [], "omega_peak": [], "FWHM": [], "amp": [], "R2": []}
+        pos_omega = omega > 0
+        w = omega[pos_omega]
+
+        for qi in q_indices:
+            sp = S[qi][pos_omega]
+            if sp.size < 5:
+                continue
+            base = np.median(np.sort(sp)[: max(1, sp.size // 5)])
+            sp = sp - base
+            # 峰定位：3 点局部极大
+            peak_i = -1
+            peak_v = -1.0
+            for i in range(1, sp.size - 1):
+                if sp[i] > sp[i - 1] and sp[i] >= sp[i + 1] and sp[i] > peak_v:
+                    peak_v = sp[i]
+                    peak_i = i
+            if peak_i < 0:
+                continue
+            w0 = w[peak_i]
+            # 半高半宽初值
+            half = peak_v / 2.0
+            hw = 0.0
+            for i in range(peak_i, sp.size):
+                if sp[i] <= half:
+                    hw = w[i] - w0
+                    break
+            hw = max(hw, w[1] - w[0])
+            if fit == "lorentzian":
+                def model(x, A, wc, G):
+                    return A * G * G / ((x - wc) ** 2 + G * G)
+                p0 = [peak_v, w0, hw]
+                bounds = ([0, w[0], 1e-4], [np.inf, w[-1], 10 * (w[-1] - w[0])])
+            else:
+                def model(x, A, wc, s):
+                    return A * np.exp(-(x - wc) ** 2 / (2 * s * s))
+                p0 = [peak_v, w0, hw / 2.3548]
+                bounds = ([0, w[0], 1e-4], [np.inf, w[-1], 10 * (w[-1] - w[0])])
+            try:
+                popt, _ = curve_fit(model, w, sp, p0=p0, bounds=bounds, maxfev=20000)
+                pred = model(w, *popt)
+                ss_res = np.sum((sp - pred) ** 2)
+                ss_tot = np.sum((sp - np.mean(sp)) ** 2)
+                R2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+            except Exception:
+                popt = p0
+                R2 = 0.0
+            FWHM = 2.0 * abs(popt[2]) if fit == "lorentzian" else 2.3548 * abs(popt[2])
+            qx, qy = q_grid[qi]
+            out["q_frac"].append((qx / self.lat.Nx, qy / self.lat.Ny))
+            out["omega_peak"].append(float(popt[1]))
+            out["FWHM"].append(float(FWHM))
+            out["amp"].append(float(popt[0]))
+            out["R2"].append(float(R2))
+            if verbose:
+                print(f"q={out['q_frac'][-1]} | ω₀={popt[1]:.4f} "
+                      f"FWHM={FWHM:.4f} A={popt[0]:.2f} R²={R2:.3f}")
+        for k in out:
+            out[k] = np.asarray(out[k])
+        return out
 
     def export_xyz(self, path="spins.xyz", species=None, spin_scale=1.0, trajectory=None):
         """导出自旋构型为 .xyz（原子 + 磁矩矢量列），OVITO 直接可视化。
