@@ -477,9 +477,15 @@ class MonteCarlo2D:
 
         # ---- ΔS_M：麦克斯韦关系 ΔS_M(T) = ∫ (∂M/∂T)_B dB ----
         # 比绝对熵积分稳：无 E₀ 外推、无 β 尾巴；T→0 时 ∂M/∂T→0 自动归零。
+        # ⚠️ B=0 列必须取 |M|：无场时自发磁化方向随机（单 seed 冷却扫描会在
+        # 相变处从 + 翻转到 −），∂M_z/∂T 产生虚假正峰 → ΔS_M(0→2T) 低温变正
+        # （"反铁磁假象"）。|M_z| 是场方向无关的自发磁化标量，物理正确
+        # （2026-08-14 用户质疑"20-30K 反铁磁"定位到此根因）。
+        M_eff = M.copy()
+        M_eff[:, 0] = np.abs(M_eff[:, 0])
         # T 升序排列后中心差分，再做 3 点滑动平均压噪声。
         T_asc = np.argsort(T_list)
-        M_asc = M[T_asc]                       # (nT, nB)，T 升序
+        M_asc = M_eff[T_asc]                  # (nT, nB)，T 升序
         T_a = T_list[T_asc]
         dM_dT = np.zeros_like(M_asc)
         dM_dT[1:-1] = (M_asc[2:] - M_asc[:-2]) / (T_a[2:] - T_a[:-2])[:, None]
