@@ -52,11 +52,11 @@ T, B, S_abs, dS_M, C, dT_ad = mc.run_magnetocaloric(
 
 - **ΔS_M 用麦克斯韦关系**：ΔS_M(T,ΔB) = (μ_s/k_B)·∫₀^{ΔB} (∂M/∂T)_{B'} dB'（M 为每自旋无量纲平均、B 用 Tesla；μ_s/k_B≈1.343 不可省；T→0 自动归零）
 - **ΔT_ad 用等熵构造（严格）**：S(T₂,B) = S(T₁,0) → ΔT_ad = T₂−T₁（反插值；不受 C 噪声影响，无解为 NaN）
-- **单位**：`molar_mass_g_per_mol` 给定时 ΔS_M 与 C 输出 **J/(kg·K)**（换算 R/M×10³；CrI₃=432.7 → |ΔS_M| 峰 3.09 J/(kg·K) @ 35 K），None 时 k_B/自旋
+- **单位**：`molar_mass_g_per_mol` 给定时 ΔS_M 与 C 输出 **J/(kg·K)**（换算 R/M×10³；CrI₃=432.7 → |ΔS_M| 峰 4.19 J/(kg·K) @ 35.1 K，2026-08-14 μ_s 因子修正后重跑），None 时 k_B/自旋
 - 绝对熵 S(T,B) = ln(4π) − ∫₀^β (E−E₀)dβ' + β(E−E₀) 也输出（低 T 需充分平衡否则不可靠）
 - C(T) = N·Var(e)/(k_B T²)（涨落公式）
 - 验收：ΔS_M<0（常规 MCE）、|ΔS_M| 峰在 Tc、ΔT_ad>0、T→0 归零
-- 已验证：J=0 体系绝对熵与单自旋解析解吻合；CrI3 演示 ΔT_ad 峰 6.4 K @ 39 K（⚠️ 2026-08-14 修正 μ_s/k_B 因子后 |ΔS_M| 数值待重跑 demo 更新）
+- 已验证：J=0 体系绝对熵与单自旋解析解吻合；CrI3 演示 ΔT_ad 峰 6.35 K @ 38.6 K、|ΔS_M| 峰 4.19 J/(kg·K) @ 35.1 K（2026-08-14 μ_s 因子修正后重跑）
 
 ### 自旋结构因子
 
@@ -159,7 +159,7 @@ res = mc.run_phase_diagram(
 - **协议三选一**：`cooling`（field-cooled，逐 T 降温 warm start——skyrmion 口袋最易出现）、`heating`（ZFC-like，滞后对照）、`fresh`（每点独立随机态，无记忆）
 - 相标签 = `magnetic_structure_analysis` 分类，skyrmion 计数（n_sk≥1 且 Q≠0）优先覆盖 S(q) 标签
 - ⚠️ 滞后警告：相边界依赖冷却/加热路径（亚稳态卡滞是真实物理）；生产扫描请加长 equip_steps 或配合 Parallel Tempering
-- 示例：`PhaseDiagram_demo/phase_diagram_J10.csv/png`（J=−10/D=1.45/A=0.04，24×24，6×11 网格，B=1T 低温 skyrmion 口袋可见）
+- 示例：`PhaseDiagram_demo/phase_diagram_J10.csv/png`（J=−10/D=1.45/A=−0.04，24×24，6×11 网格）。2026-08-14 协议语义修正后重跑：**真 cooling（降温）路径下 B≥0.3 T 低温区为 FM**（场冷却基态；旧"低温 skyrmion 口袋"是升序 T 输入+假 cooling 导致的加热路径亚稳态伪影）；helical/skyrmion 晶格标签出现在 B≲0.3 T 与高 T 区——24×24 短平衡下高 T 标签受热涨落影响，建议用更大格子 + 更长 equip_steps 验证
 
 ### Skyrmion 扩散 + 寿命（动力学可观测量）
 
@@ -234,7 +234,7 @@ mean, std, all_res = run_curie_temperature_seeds(
     - PT 改固定温度槽表述（修复混合 walker/slot 导致的细致平衡破坏）+ 接受率分母修正（原报告值减半）
     - E₀ 外推改 T 线性拟合（经典 equipartition；T² 拟合实测高估 +0.4~0.8 meV）
     - POSCAR 多物种按物种分组逐物种计数；export_xyz species 列表逐原子写入；MSD unwrap 去最小镜像截断；seeds 输出 18 列头；skyrmion 中心 PBC 最小镜像去重
-    - ⚠️ MCE/动力学输出数值因此修正而变化：README 旧数值（|ΔS_M| 3.09 J/kg/K 等）以重跑 demo 为准
+    - ⚠️ MCE/动力学输出数值因此修正而变化：已重跑更新——MCE |ΔS_M| 峰 3.09 → **4.19 J/(kg·K) @ 35.1 K**（μ_s 因子 1.343× 吻合），ΔT_ad 6.4 → 6.35 K @ 38.6 K（不受影响）；相图 demo 真 cooling 下低温 skyrmion 口袋消失（旧为加热路径伪影）
 
 ## 已知限制
 
