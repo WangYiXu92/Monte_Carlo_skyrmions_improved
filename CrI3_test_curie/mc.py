@@ -1772,6 +1772,45 @@ class MonteCarlo2D:
         np.savetxt(output_file, results, header="B_z(T) M_z_mean_spin", fmt="%.8f")
         return np.asarray(results)
 
+    def run_magnetization_curves(self, T_list, B_list, equip_steps, calc_steps,
+                                 sample_interval=4, output_csv=None):
+        """等温磁化曲线 M(B) 与热磁曲线 M(T)：T×B 双重扫描采样 <M_z>。
+
+        循环序 B 外 T 内（同 run_magnetocaloric）：每个 B 沿 T 降序冷却，
+        B=0 态继承前一 T——即"零场冷却后升场"协议；每个 (T,B) 平衡
+        ``equip_steps`` sweep 后对 ``calc_steps`` 个记录点求 <M_z> 平均。
+        返回 (T_list, B_list, M[nT, nB])：M[i,j] = M(T_i, B_j)（每自旋 z 分量）。
+        output_csv 给定时写 3 列 T B M。
+        """
+        import numpy as np
+        nT, nB = len(T_list), len(B_list)
+        M = np.zeros((nT, nB))
+        print(f"--- 磁化曲线: {nT} 温度 × {nB} 场 ---")
+        orig_B = self.ham.B_field_meV.copy()
+        try:
+            for j, Bz in enumerate(B_list):
+                self.ham.B_field_meV = np.array([0.0, 0.0, Bz], dtype=np.float64) * MU_S_MEV_PER_T
+                for i, T in enumerate(T_list):
+                    self._validate_sampling(float(T), equip_steps, calc_steps, sample_interval)
+                    for _ in range(equip_steps):
+                        self.mc_step(T)
+                    m_acc = 0.0
+                    for _ in range(calc_steps):
+                        for _ in range(sample_interval):
+                            self.mc_step(T)
+                        m_acc += self.get_magnetization()[1][2]
+                    M[i, j] = m_acc / calc_steps
+                    print(f"  B={Bz:5.2f} T  T={T:6.1f} K  M={M[i,j]:.3f}")
+        finally:
+            self.ham.B_field_meV = orig_B
+        if output_csv:
+            with open(output_csv, "w") as f:
+                f.write("# T(K) B(T) M_per_spin\n")
+                for i in range(nT):
+                    for j in range(nB):
+                        f.write(f"{T_list[i]:.4f} {B_list[j]:.4f} {M[i,j]:.8f}\n")
+        return T_list, B_list, M
+
 
 # ==========================================
 # 多 seed 并行工具（multiprocessing）
