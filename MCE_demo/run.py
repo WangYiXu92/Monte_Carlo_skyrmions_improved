@@ -47,9 +47,9 @@ def build_simulator():
 MCE_PARAMS = {
     "T_list": np.linspace(100.0, 1.0, 30),   # K（降温方向）
     "B_list": [0.0, 2.0, 4.0, 6.0],          # Tesla
-    "equip_steps": 3000,
-    "calc_steps": 4000,
-    "sample_interval": 2,
+    "equip_steps": 20000,                    # 2026-08-14: 3000 → 20000（实测 3000 滞后 2 meV/spin，ΔT_ad 失真）
+    "calc_steps": 8000,
+    "sample_interval": 4,
     "molar_mass_g_per_mol": 432.7,           # CrI₃ 摩尔质量（g/mol，每 Cr 自旋）
     "output_file": "mce_results.txt",
 }

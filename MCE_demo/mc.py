@@ -460,6 +460,21 @@ class MonteCarlo2D:
         kB_T2 = KB_MEV_PER_K * T_list**2
         C = self.lat.N_total * (U2 - U**2) / kB_T2[:, None]
 
+        # ---- 平衡自洽校验：热力学恒等式 C = d⟨E⟩/dT ----
+        # 冷却/加热扫描平衡不足（滞后）或慢模式采样不足时 E(T) 斜率/涨落热容
+        # 显著背离（2026-08-14 实测：短平衡 47×，长平衡仍 ~6-12× 来自 FM 团簇慢模式）——
+        # S_abs 与等熵 ΔT_ad 的不确定性随该比值增大。显式提示而非静默输出。
+        dUdT = np.abs(np.diff(U, axis=0)) / np.abs(np.diff(T_list))[:, None]  # meV/K
+        C_slope = dUdT / KB_MEV_PER_K                                        # k_B/spin
+        ratio = C_slope / np.maximum(C[:-1, :], 1e-9)
+        if ratio.max() > 10.0:
+            print(f"⚠️ 平衡提示：能量斜率热容/涨落热容最大比 {ratio.max():.1f}× "
+                  f"（平衡不足或慢模式未采样 → S_abs/等熵 ΔT_ad 不确定性大；"
+                  f"建议增大 equip_steps/calc_steps 或与加热路径对照）")
+        elif ratio.max() > 3.0:
+            print(f"ℹ️ 平衡提示：能量斜率热容/涨落热容最大比 {ratio.max():.1f}× "
+                  f"（慢模式贡献；S_abs/ΔT_ad 存在 ~k_B/自旋级不确定性）")
+
         # ---- ΔS_M：麦克斯韦关系 ΔS_M(T) = ∫ (∂M/∂T)_B dB ----
         # 比绝对熵积分稳：无 E₀ 外推、无 β 尾巴；T→0 时 ∂M/∂T→0 自动归零。
         # T 升序排列后中心差分，再做 3 点滑动平均压噪声。
@@ -501,6 +516,17 @@ class MonteCarlo2D:
                     dT_ad[i, j] = T2 - Ta2[i]
         inv2 = np.argsort(T_asc2)
         dT_ad = dT_ad[inv2]
+
+        # ---- ΔT_ad 质量门（2026-08-14 长平衡实测后加入）----
+        # ① 信号阈值：|ΔS_M| < 10% 峰值 → 等熵解是数值噪声（高温段慢模式/统计涨落
+        #    使 S 场差与斜率不可判定——T>1.5Tc 处典型）
+        dS_scale = np.max(np.abs(dS_M), axis=0, keepdims=True)
+        dT_ad[np.abs(dS_M) < 0.1 * dS_scale] = np.nan
+        # ② 一致性：S_abs 场差 vs 麦克斯韦 ΔS_M 分歧 > 100% → 等熵输入不可信
+        #    （低温段 E(T) 滞后残余导致 S 差虚大）
+        ds_abs = S[:, 1:] - S[:, :1]                      # 同 dS_M 列语义（conv 单位）
+        incons = np.abs(ds_abs - dS_M) / np.maximum(np.abs(dS_M), 1e-12)
+        dT_ad[incons > 1.0] = np.nan
 
         # ---- 单位换算：k_B/自旋 → J/(kg·K)（molar_mass_g_per_mol 给定时）----
         # 换算因子 = R/M_mol×10³（R = k_B·N_A = 8.3145 J/(mol·K)）
