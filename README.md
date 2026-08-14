@@ -50,13 +50,13 @@ T, B, S_abs, dS_M, C, dT_ad = mc.run_magnetocaloric(
 )
 ```
 
-- **ΔS_M 用麦克斯韦关系**：ΔS_M(T,ΔB) = ∫₀^{ΔB} (∂M/∂T)_{B'} dB'（稳、无外推、T→0 自动归零）
+- **ΔS_M 用麦克斯韦关系**：ΔS_M(T,ΔB) = (μ_s/k_B)·∫₀^{ΔB} (∂M/∂T)_{B'} dB'（M 为每自旋无量纲平均、B 用 Tesla；μ_s/k_B≈1.343 不可省；T→0 自动归零）
 - **ΔT_ad 用等熵构造（严格）**：S(T₂,B) = S(T₁,0) → ΔT_ad = T₂−T₁（反插值；不受 C 噪声影响，无解为 NaN）
 - **单位**：`molar_mass_g_per_mol` 给定时 ΔS_M 与 C 输出 **J/(kg·K)**（换算 R/M×10³；CrI₃=432.7 → |ΔS_M| 峰 3.09 J/(kg·K) @ 35 K），None 时 k_B/自旋
 - 绝对熵 S(T,B) = ln(4π) − ∫₀^β (E−E₀)dβ' + β(E−E₀) 也输出（低 T 需充分平衡否则不可靠）
 - C(T) = N·Var(e)/(k_B T²)（涨落公式）
 - 验收：ΔS_M<0（常规 MCE）、|ΔS_M| 峰在 Tc、ΔT_ad>0、T→0 归零
-- 已验证：J=0 体系与单自旋解析解吻合（±0.006 k_B）；CrI3 演示 ΔT_ad 峰 6.4 K @ 39 K
+- 已验证：J=0 体系绝对熵与单自旋解析解吻合；CrI3 演示 ΔT_ad 峰 6.4 K @ 39 K（⚠️ 2026-08-14 修正 μ_s/k_B 因子后 |ΔS_M| 数值待重跑 demo 更新）
 
 ### 自旋结构因子
 
@@ -225,6 +225,16 @@ mean, std, all_res = run_curie_temperature_seeds(
 9. **CrI3 例子平衡修复**：heating 扫描低 T 从随机初态弛豫极慢（M(1K)≈0.2 伪值）→ 改 cooling 扫描（100→1K）+ 30×30 + 5000 sweeps/T（实测 Tc≈37 K）
 10. **MX2 磁滞物理修复**：原版 J=−8/A=−0.05 场翻不动且太软（无磁滞）→ J=−0.5/A=−1.5/T=2K（Ising 型成核翻转，实测矫顽场 ~15 T）
 11. **skyrmion 退火加长**：steps_per_T 2000→4000（90×90 淬火过快冻结亚稳态）
+12. **2026-08-14 三方审核修复批次**（AGY/Codex/Claude + 数值实证，回归测试 `mc_regression_tests.py` 12 项固化）：
+    - Langevin 噪声加 k_B 因子（√(2λk_BT/dt)，原幅度大 3.4×）；Heun 校正步复用同一噪声增量（原重新抽样破坏涨落-耗散）
+    - `local_field` 跨子格键 0.5 因子修正（Nb>1 有效场曾砍半；on-site 键同步修正）
+    - ΔS_M 加 μ_s/k_B≈1.343 因子（原小 0.744×，J=0 解析对照验证）；MCE 的 M 改逐采样平均并用 M_z（原单次快照 + |M| 高 T 偏置）
+    - S(q) 子格相位移至频域 + 子格相干求和（honeycomb FM S(0)=N 验证）；S(q,ω) 零填充线性相关 + 单边因子 2 + 全子格
+    - B-T 相图：Nb≠1 不再崩溃（Q/n_sk 跳过）、协议显式排序（cooling=降温，输入 T 顺序任意）、采样计数修正、B 场 try/finally 恢复
+    - PT 改固定温度槽表述（修复混合 walker/slot 导致的细致平衡破坏）+ 接受率分母修正（原报告值减半）
+    - E₀ 外推改 T 线性拟合（经典 equipartition；T² 拟合实测高估 +0.4~0.8 meV）
+    - POSCAR 多物种按物种分组逐物种计数；export_xyz species 列表逐原子写入；MSD unwrap 去最小镜像截断；seeds 输出 18 列头；skyrmion 中心 PBC 最小镜像去重
+    - ⚠️ MCE/动力学输出数值因此修正而变化：README 旧数值（|ΔS_M| 3.09 J/kg/K 等）以重跑 demo 为准
 
 ## 已知限制
 

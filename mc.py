@@ -146,7 +146,11 @@ def _total_energy_numba(spins, Nx, Ny, num_bonds, bond_targets, bond_matrices, A
                     J_Sj_x = J[0,0]*S_j[0] + J[0,1]*S_j[1] + J[0,2]*S_j[2]
                     J_Sj_y = J[1,0]*S_j[0] + J[1,1]*S_j[1] + J[1,2]*S_j[2]
                     J_Sj_z = J[2,0]*S_j[0] + J[2,1]*S_j[1] + J[2,2]*S_j[2]
-                    E += 0.5 * (S_i[0]*J_Sj_x + S_i[1]*J_Sj_y + S_i[2]*J_Sj_z)
+                    # on-site 键（b1==b2 且 δ=0）无反条目：不计 0.5（否则能量减半）
+                    if neighbor_b == b and dx == 0 and dy == 0:
+                        E += S_i[0]*J_Sj_x + S_i[1]*J_Sj_y + S_i[2]*J_Sj_z
+                    else:
+                        E += 0.5 * (S_i[0]*J_Sj_x + S_i[1]*J_Sj_y + S_i[2]*J_Sj_z)
                 E += A_ani[b] * S_i[2] * S_i[2]
                 E -= (B_field_meV[0]*S_i[0] + B_field_meV[1]*S_i[1] + B_field_meV[2]*S_i[2])
     return E
@@ -180,7 +184,8 @@ class Hamiltonian:
         B_field: 外磁场矢量 (Tesla)
         """
         self.Nb = Nb
-        self.A = np.ones(Nb, dtype=np.float64) * A_ani if np.isscalar(A_ani) else np.array(A_ani, dtype=np.float64)
+        # np.ndim 同时兼容 Python 标量与 np.float64（np.isscalar(np.float64) 返回 False）
+        self.A = np.ones(Nb, dtype=np.float64) * A_ani if np.ndim(A_ani) == 0 else np.array(A_ani, dtype=np.float64)
 
         # 将传入的磁场(Tesla)转化为塞曼能量(meV)
         self.B_field_meV = np.array(B_field, dtype=np.float64) * MU_S_MEV_PER_T
@@ -295,23 +300,24 @@ class MonteCarlo2D:
         )
 
     def spin_structure_factor(self):
-        """自旋结构因子 S(q) = |Σ_r S(r) e^{iq·r}|²/N（含子格相位）。
+        """自旋结构因子 S(q) = |Σ_b e^{iq·τ_b} Σ_r S_b(r) e^{iq·r}|²/N。
 
-        返回 (q1, q2, S) 三个网格数组。q 是 FFT 频域索引（整数，
-        实际波矢 = 2π·(q1/Nx)·b1* + 2π·(q2/Ny)·b2*，b* 为倒格矢）。
-        用途：识别磁序——FM 在 q=(0,0) 有峰；螺旋/自旋密度波在
-        q=±q*；skyrmion 晶格出现 q=0 强峰 + 晶格 Bragg 峰。
+        子格相位乘在频域（e^{−2πi(q1·f1/Nx + q2·f2/Ny)}），子格间相干求和
+        （先加后取模——分别取模丢失干涉项）。返回 (q1, q2, S) 整数频域索引
+        （实际波矢 = 2π·(q1/Nx)·b1* + 2π·(q2/Ny)·b2*，b* 为倒格矢）。
+        用途：识别磁序——FM 在 q=(0,0) 有峰；螺旋/自旋密度波在 q=±q*；
+        skyrmion 晶格出现 q=0 强峰 + 晶格 Bragg 峰。
         """
         Nx, Ny, Nb, _ = self.spins.shape
-        S_sum = np.zeros((Nx, Ny), dtype=np.complex128)
+        iq = np.arange(Nx)[:, None]
+        jq = np.arange(Ny)[None, :]
+        F_total = np.zeros((Nx, Ny, 3), dtype=np.complex128)
         for b in range(Nb):
             f1, f2 = self.lat.basis[b]
-            # 子格位置相位：S(q) = Σ_b e^{iq·τ_b} Σ_r S_b(r) e^{iq·r}
-            phase = np.exp(-2j*np.pi*(f1*np.arange(Nx)[:, None] + f2*np.arange(Ny)[None, :]))
+            phase = np.exp(-2j*np.pi*(f1*iq/Nx + f2*jq/Ny))
             for comp in range(3):
-                F = np.fft.fft2(self.spins[:, :, b, comp] * phase)
-                S_sum += F * np.conj(F)
-        S = S_sum.real / (Nx * Ny * Nb)
+                F_total[:, :, comp] += np.fft.fft2(self.spins[:, :, b, comp]) * phase
+        S = np.sum(F_total * np.conj(F_total), axis=2).real / (Nx * Ny * Nb)
         q1 = np.fft.fftfreq(Nx) * Nx   # 整数索引 [-Nx/2, Nx/2)
         q2 = np.fft.fftfreq(Ny) * Ny
         return q1, q2, S
@@ -383,6 +389,8 @@ class MonteCarlo2D:
         import numpy as np
         T_list = np.asarray(T_list, float)
         B_list = np.asarray(B_list, float)
+        if len(B_list) == 0 or B_list[0] != 0.0:
+            raise ValueError("B_list 必须以 0 T 开头（ΔS_M/ΔT_ad 相对 B=0）")
         nT, nB = len(T_list), len(B_list)
 
         U = np.zeros((nT, nB))      # 每自旋平均能量 (meV)
@@ -390,24 +398,30 @@ class MonteCarlo2D:
         M = np.zeros((nT, nB))      # |M|
 
         print(f"--- MCE: {nT} 温度 × {nB} 场 ---")
-        for j, Bz in enumerate(B_list):
-            self.ham.B_field_meV = np.array([0.0, 0.0, Bz], dtype=np.float64) * MU_S_MEV_PER_T
-            for i, T in enumerate(T_list):
-                self._validate_sampling(float(T), equip_steps, calc_steps, sample_interval)
-                for _ in range(equip_steps):
-                    self.mc_step(T)
-                N = self.lat.N_total
-                e_acc = e2_acc = 0.0
-                for _ in range(calc_steps):
-                    for _ in range(sample_interval):
+        orig_B = self.ham.B_field_meV.copy()
+        try:
+            for j, Bz in enumerate(B_list):
+                self.ham.B_field_meV = np.array([0.0, 0.0, Bz], dtype=np.float64) * MU_S_MEV_PER_T
+                for i, T in enumerate(T_list):
+                    self._validate_sampling(float(T), equip_steps, calc_steps, sample_interval)
+                    for _ in range(equip_steps):
                         self.mc_step(T)
-                    E = self.total_energy() / N
-                    e_acc += E
-                    e2_acc += E * E
-                U[i, j] = e_acc / calc_steps
-                U2[i, j] = e2_acc / calc_steps
-                M[i, j] = self.get_magnetization()[0]
-                print(f"  B={Bz:5.2f} T  T={T:6.1f} K  <E>={U[i,j]:7.4f} meV/spin  M={M[i,j]:.3f}")
+                    N = self.lat.N_total
+                    e_acc = e2_acc = m_acc = 0.0
+                    for _ in range(calc_steps):
+                        for _ in range(sample_interval):
+                            self.mc_step(T)
+                        E = self.total_energy() / N
+                        e_acc += E
+                        e2_acc += E * E
+                        # 麦克斯韦关系用 M_z（场沿 z）：|⟨S⟩| 在高 T 含 1/√N 各向同性偏置
+                        m_acc += self.get_magnetization()[1][2]
+                    U[i, j] = e_acc / calc_steps
+                    U2[i, j] = e2_acc / calc_steps
+                    M[i, j] = m_acc / calc_steps
+                    print(f"  B={Bz:5.2f} T  T={T:6.1f} K  <E>={U[i,j]:7.4f} meV/spin  M={M[i,j]:.3f}")
+        finally:
+            self.ham.B_field_meV = orig_B
 
         # ---- 熵积分：S(T,B) = ln(4π) − ∫₀^β (E−E₀) dβ' + β(E−E₀)（每自旋, k_B=1）----
         # 注意：不能直接用 ∫E dβ' 的形式——低 T 时 ∫ 与 βE 是发散量的差，
@@ -418,12 +432,15 @@ class MonteCarlo2D:
         S = np.zeros_like(U)
         E_inf = np.mean(self.ham.A) / 3.0   # 高温极限能量 E(∞) = ⟨A⟩/3（每自旋）
         for j in range(nB):
-            # 基态能量外推：2D 经典自旋波 E−E₀ ∝ T²，用 E = E₀ + c·T² 拟合
-            # 最低 4 个 T（含 T 线性项的拟合会被低 T 噪声拉偏 → S 出现负值）
+            # 基态能量外推：经典自旋波 equipartition E−E₀ ∝ T（每模 k_BT），
+            # 用 E = E₀ + c·T 线性拟合最低 4 个 T（T² 拟合系统性高估 E₀，实测 +0.4~0.8 meV）
             n_ex = min(4, nT)
             Tf = T_s[-n_ex:]
             Uf = U_s[-n_ex:, j]
-            c, E0 = np.polyfit(Tf**2, Uf, 1)
+            if len(Tf) < 2:
+                E0 = Uf[0]
+            else:
+                _, E0 = np.polyfit(Tf, Uf, 1)
             # 物理约束：基态能量 E₀ ≤ U(T_min)（T>0 平均能量不低于基态）
             E0 = min(E0, Uf[0])
             # (E−E₀) 在 β 网格上梯形积分；β=0 端点补 E(∞)−E₀（漏掉 [0,β₁] 段
@@ -453,7 +470,7 @@ class MonteCarlo2D:
         dM_dT[1:-1] = (M_asc[2:] - M_asc[:-2]) / (T_a[2:] - T_a[:-2])[:, None]
         dM_dT[0] = (M_asc[1] - M_asc[0]) / (T_a[1] - T_a[0])
         dM_dT[-1] = (M_asc[-1] - M_asc[-2]) / (T_a[-1] - T_a[-2])
-        # 5 点加权滑动平均 [1,4,6,4,1]/16（边界反射）；3 点对高 T 噪声压不住
+        # 5 点加权滑动平均 [1,4,6,4,1]/16（边界 clamp 复制端点）
         dM_dT_s = np.zeros_like(dM_dT)
         for i in range(nT):
             idx = np.clip([i-2, i-1, i, i+1, i+2], 0, nT-1)
@@ -465,6 +482,9 @@ class MonteCarlo2D:
                 dM_dT_s[:, :j + 2], B_list[:j + 2], axis=1)
         inv = np.argsort(T_asc)
         dS_M = dS_M[inv]
+        # Δs/k_B = (μ_s/k_B)·∫(∂m/∂T)dB（m 为无量纲每自旋平均、B 用 Tesla；
+        # 缺 μ_s/k_B≈1.343 因子结果系统性小 0.744×——J=0 解析裁决实测）
+        dS_M *= MU_S_MEV_PER_T / KB_MEV_PER_K
 
         # ---- ΔT_ad：等熵构造（严格）----
         # 绝热加场 B：S(T₂, B) = S(T₁, 0) → ΔT_ad = T₂ − T₁
@@ -708,7 +728,7 @@ class MonteCarlo2D:
         lat_mat = np.array([[L1[0], L2[0]], [L1[1], L2[1]]])   # 2×2（列 = 基矢）
         inv = np.linalg.inv(lat_mat)
 
-        atoms = []      # (frac_x, frac_y, frac_z, spin)
+        atoms = []      # (frac_x, frac_y, frac_z, spin, species)
         for k, (x, y) in enumerate(sites):
             for b in range(Nb):
                 cart2 = coords_all[x, y, b]         # (2,)
@@ -716,25 +736,33 @@ class MonteCarlo2D:
                 frac = frac % 1.0
                 frac = np.where(frac > 1.0 - 1e-10, 0.0, frac)   # 浮点舍入保护
                 spin = cs[k // cs.shape[1], k % cs.shape[1], b] * spin_scale
-                atoms.append((frac[0], frac[1], 0.0, spin))
+                atoms.append((frac[0], frac[1], 0.0, spin, None))
         n_atoms = len(atoms)
 
-        sp = species if species is not None else ["Spin"] * n_atoms
-        if len(sp) != n_atoms:
-            sp = ["Spin"] * n_atoms
+        if species is None:
+            sp_list = ["Spin"] * n_atoms
+        else:
+            sp_list = list(species)
+            if len(sp_list) != n_atoms:
+                raise ValueError(f"species 长度 {len(sp_list)} != 原子数 {n_atoms}")
+        # 按物种分组重排（POSCAR 要求：原子按物种行顺序排列，第 7 行为逐物种计数）
+        sp_order = sorted(set(sp_list))
+        counts = [sp_list.count(s) for s in sp_order]
+        order = [i for s in sp_order for i in range(n_atoms) if sp_list[i] == s]
+        atoms = [atoms[i] + (sp_list[i],) for i in order]
 
         lines = [f"Magnetic cell from Monte Carlo (order={r['order']}, Q={r['top_charge']:.3f}, "
                  f"cell={r['cell_matrix']})"]
         lines.append("1.0")
         for L in (L1, L2, L3):
             lines.append(f"  {L[0]: .6f} {L[1]: .6f} {L[2]: .6f}")
-        lines.append(" ".join(sorted(set(sp))))
-        lines.append(str(n_atoms))
+        lines.append(" ".join(sp_order))
+        lines.append(" ".join(map(str, counts)))
         lines.append("Direct")
-        for (fx, fy, fz, _s) in atoms:
+        for (fx, fy, fz, _s, _sp) in atoms:
             lines.append(f"  {fx: .8f} {fy: .8f} {fz: .8f}")
 
-        magmom = " ".join(f"{s[0]:.6f} {s[1]:.6f} {s[2]:.6f}" for (_f, _g, _h, s) in atoms)
+        magmom = " ".join(f"{s[0]:.6f} {s[1]:.6f} {s[2]:.6f}" for (_f, _g, _h, s, _sp) in atoms)
 
         text = "\n".join(lines) + "\n"
         if path:
@@ -800,11 +828,12 @@ class MonteCarlo2D:
                        for dx in (-1, 0, 1) for dy in (-1, 0, 1)
                        if not (dx == 0 and dy == 0)):
                     cands.append((x, y))
-        # 拓扑荷验证 + 去重（合并半径 r_verify 内候选）
+        # 拓扑荷验证 + 去重（合并半径 r_verify 内候选；PBC 最小镜像距离，
+        # 避免跨边界候选漏合并导致双计）
         centers = []
-        used = set()
         for (x, y) in sorted(cands, key=lambda c: mz[c]):
-            if any((x-cx) % Nx <= r_verify and (y-cy) % Ny <= r_verify
+            if any(min((x-cx) % Nx, (cx-x) % Nx) <= r_verify
+                   and min((y-cy) % Ny, (cy-y) % Ny) <= r_verify
                    for (cx, cy, _q) in centers):
                 continue
             # 局部拓扑荷
@@ -944,54 +973,66 @@ class MonteCarlo2D:
             raise ValueError("protocol 必须为 'cooling' / 'heating' / 'fresh'")
         if len(B_list) == 0 or len(T_list) == 0:
             raise ValueError("B_list / T_list 不能为空")
+        if sample_interval <= 0:
+            raise ValueError("sample_interval 必须 > 0")
         phases = np.empty((len(B_list), len(T_list)), dtype=object)
         M_arr = np.zeros((len(B_list), len(T_list)))
         Q_arr = np.zeros((len(B_list), len(T_list)))
         nsk_arr = np.zeros((len(B_list), len(T_list)))
+        nb1 = self.lat.Nb == 1          # 拓扑荷/定位仅 Nb=1 支持（多子格跳过，防 NotImplementedError）
 
-        # 预热 JIT
-        self.mc_step(float(T_list[0]))
-        t_idx = {float(t): i for i, t in enumerate(T_list)}  # T → 列索引
+        # 协议显式排序（输入 T_list 任意顺序均可）：cooling=降温、heating=升温、
+        # fresh=每点独立随机（顺序无关）
+        T_asc = sorted(float(t) for t in T_list)
+        T_order = list(reversed(T_asc)) if protocol == "cooling" else T_asc
+        it_of = {T: i for i, T in enumerate(T_list)}
 
-        for ib, B in enumerate(B_list):
-            self.ham.B_field_meV = np.array([0.0, 0.0, B]) * MU_S_MEV_PER_T
-            Ts = T_list if protocol in ("cooling", "fresh") else T_list[::-1]
-            if protocol == "fresh":
-                self.spins = self._random_spins()
-            for T in Ts:
-                it = t_idx[float(T)]
-                for _ in range(equip_steps):
-                    self.mc_step(float(T))
-                # 统计平均
-                Msum = Qsum = nsk = 0.0
-                n_samp = 0
-                for _ in range(calc_steps):
-                    self.mc_step(float(T))
-                    Msum += self.get_magnetization()[0]
-                    if sample_interval > 0 and n_samp % sample_interval == 0:
-                        Qsum += abs(self.topological_charge())
-                        if classify:
-                            nsk += len(self.skyrmion_positions())
-                    n_samp += 1
-                M_arr[ib, it] = Msum / n_samp
-                Q_arr[ib, it] = Qsum / max(1, n_samp // sample_interval)
-                if classify:
-                    res = self.magnetic_structure_analysis()
-                    order = res["order"]
-                    n_sk = nsk / max(1, n_samp // sample_interval)
-                    nsk_arr[ib, it] = n_sk
-                    # skyrmion 计数优先于 S(q) 分类（S(q) 对少 skyrmion 不敏感）
-                    if n_sk >= 1 and res["top_charge"] != 0:
-                        order = "skyrmion_lattice"
-                    phases[ib, it] = order
-                    if verbose:
-                        print(f"B={B:5.2f} T T={T:7.3f} K | {order:16s} | "
-                              f"M={M_arr[ib, it]:.3f} "
-                              f"Q={Q_arr[ib, it]:.2f} "
-                              f"N_sk={n_sk:.1f}")
-                else:
-                    if verbose:
-                        print(f"B={B:5.2f} T T={T:7.3f} K | M={M_arr[ib, it]:.3f}")
+        orig_B = self.ham.B_field_meV.copy()
+        try:
+            for ib, B in enumerate(B_list):
+                self.ham.B_field_meV = np.array([0.0, 0.0, B]) * MU_S_MEV_PER_T
+                if protocol == "fresh":
+                    self.spins = self._random_spins()
+                for T in T_order:
+                    it = it_of[T]
+                    for _ in range(equip_steps):
+                        self.mc_step(float(T))
+                    # 统计平均（n_hits 显式计数采样次数）
+                    Msum = Qsum = nsk = 0.0
+                    n_samp = 0
+                    n_hits = 0
+                    for _ in range(calc_steps):
+                        self.mc_step(float(T))
+                        Msum += self.get_magnetization()[0]
+                        if n_samp % sample_interval == 0:
+                            n_hits += 1
+                            if nb1:
+                                Qsum += abs(self.topological_charge())
+                                if classify:
+                                    nsk += len(self.skyrmion_positions())
+                        n_samp += 1
+                    M_arr[ib, it] = Msum / n_samp
+                    if n_hits:
+                        Q_arr[ib, it] = Qsum / n_hits
+                    if classify:
+                        res = self.magnetic_structure_analysis()
+                        order = res["order"]
+                        n_sk = nsk / n_hits if n_hits else 0.0
+                        nsk_arr[ib, it] = n_sk
+                        # skyrmion 计数优先于 S(q) 分类（S(q) 对少 skyrmion 不敏感）
+                        if nb1 and n_sk >= 1 and res["top_charge"] != 0:
+                            order = "skyrmion_lattice"
+                        phases[ib, it] = order
+                        if verbose:
+                            print(f"B={B:5.2f} T T={T:7.3f} K | {order:16s} | "
+                                  f"M={M_arr[ib, it]:.3f} "
+                                  f"Q={Q_arr[ib, it]:.2f} "
+                                  f"N_sk={n_sk:.1f}")
+                    else:
+                        if verbose:
+                            print(f"B={B:5.2f} T T={T:7.3f} K | M={M_arr[ib, it]:.3f}")
+        finally:
+            self.ham.B_field_meV = orig_B
         if output_file:
             with open(output_file, "w") as f:
                 f.write("B,T,phase,M,Q,n_skyrmion\n")
@@ -1024,14 +1065,16 @@ class MonteCarlo2D:
         # 用能量差分或解析梯度：这里用解析梯度（键展开）
 
         def local_field():
-            """H_eff = −∂H/∂S：交换 −½ΣJ·S_j（bonds 双向存储，½ 修正同 total_energy），
+            """H_eff = −∂H/∂S：交换 −ΣJ·S_j（同子格键正反两条目在本列表各 0.5；
+            跨子格/on-site 键仅一条目，全强度——统一 0.5 会砍半跨子格场），
             各向异性 −2A·S_z ẑ，外场 +B。"""
             h = np.zeros_like(self.spins)
             for b in range(Nb):
                 for (nu, dx, dy, Jm) in self.ham.bonds[b]:
                     # S(r+δ)：roll 负向 → spins[r-δ] 移位后位置 r 存 S(r+δ)
                     S_sh = np.roll(self.spins, (-dx, -dy), axis=(0, 1))[:, :, nu]
-                    h[:, :, b] -= 0.5 * (S_sh @ Jm.T)
+                    f = 0.5 if (nu == b and (dx != 0 or dy != 0)) else 1.0
+                    h[:, :, b] -= f * (S_sh @ Jm.T)
             for b in range(Nb):
                 h[:, :, b, 2] -= 2.0 * self.ham.A[b] * self.spins[:, :, b, 2]
                 h[:, :, b] += self.ham.B_field_meV
@@ -1039,20 +1082,21 @@ class MonteCarlo2D:
 
         def heun_step(S0, h, dt, T, lam):
             """Heun 一步。S0 可能与 self.spins 同一引用——必须先拷贝，
-            否则 self.spins[:] = S1 会污染 S0，导致 k1 与 S1 不匹配（历史爆炸根因）。"""
+            否则 self.spins[:] = S1 会污染 S0，导致 k1 与 S1 不匹配（历史爆炸根因）。
+            噪声幅度 √(2λk_BT/dt)（T 需乘 k_B 换 meV）；校正步复用同一 Wiener
+            增量（标准随机 Heun——重新抽样 xi1 破坏涨落-耗散平衡）。"""
             S = S0.copy()
-            # 热噪声场
-            xi = rng.standard_normal(S.shape) * np.sqrt(2.0 * lam * T / dt)
+            # 热噪声场（k_B·T 才是能量单位）
+            xi = rng.standard_normal(S.shape) * np.sqrt(2.0 * lam * KB_MEV_PER_K * T / dt)
             # k1 = dS/dt
             SxH = np.cross(S, h + xi)
             k1 = -SxH - lam * np.cross(S, SxH)
             S1 = S + dt * k1
             S1 = S1 / np.linalg.norm(S1, axis=-1, keepdims=True)
-            # 重算场
+            # 重算场（同一噪声增量）
             self.spins[:] = S1
             h1 = local_field()
-            xi1 = rng.standard_normal(S.shape) * np.sqrt(2.0 * lam * T / dt)
-            SxH1 = np.cross(S1, h1 + xi1)
+            SxH1 = np.cross(S1, h1 + xi)
             k2 = -SxH1 - lam * np.cross(S1, SxH1)
             S_new = S + 0.5 * dt * (k1 + k2)
             S_new = S_new / np.linalg.norm(S_new, axis=-1, keepdims=True)
@@ -1096,8 +1140,9 @@ class MonteCarlo2D:
             self.spins[:] = traj[f]
             pos = self.skyrmion_positions()
             centers.append(pos)
-        # 相邻帧配对（PBC 最小镜像差）
-        tracks = []          # 每条 = [(frame, x, y), ...]
+        # 相邻帧配对（PBC 最小镜像差），坐标逐步 unwrap——避免长 τ MSD 被
+        # 最小镜像截断在 (N/2)² 导致扩散系数 D 系统性低估
+        tracks = []          # 每条 = [(frame, x_unwrapped, y_unwrapped), ...]
         for f in range(1, len(centers)):
             prev = centers[f - 1]
             curr = centers[f]
@@ -1114,18 +1159,23 @@ class MonteCarlo2D:
                         best, bj, bd = (x1, y1), j, d
                 if best is not None and bd <= match_cutoff:
                     used[bj] = True
-                    # 接到已有轨迹或开新轨迹
+                    # 接到已有轨迹或开新轨迹（按上一帧坐标匹配，坐标已 unwrap）
                     hit = None
                     for tr in tracks:
-                        if tr[-1][0] == f - 1 and tr[-1][1] == x0 and tr[-1][2] == y0:
+                        if tr[-1][0] == f - 1 and tr[-1][1] % Nx == x0 and tr[-1][2] % Ny == y0:
                             hit = tr
                             break
                     if hit is None:
-                        hit = [(f - 1, x0, y0)]
+                        hit = [(f - 1, float(x0), float(y0))]
                         tracks.append(hit)
-                    hit.append((f, best[0], best[1]))
+                    # unwrap：上一位置 + 最小镜像位移
+                    dx = best[0] - x0
+                    dy = best[1] - y0
+                    dx -= Nx * round(dx / Nx)
+                    dy -= Ny * round(dy / Ny)
+                    hit.append((f, hit[-1][1] + dx, hit[-1][2] + dy))
         tracks = [tr for tr in tracks if len(tr) >= min_track]
-        # MSD(τ)：所有帧对（PBC 最小差）
+        # MSD(τ)：所有帧对（unwrap 坐标直接差，无截断）
         tau_max = min(len(times), 25)
         msd = np.zeros(tau_max)
         tau = np.zeros(tau_max)
@@ -1138,8 +1188,6 @@ class MonteCarlo2D:
                         break
                     dx = tr[j][1] - tr[i][1]
                     dy = tr[j][2] - tr[i][2]
-                    dx = min(abs(dx), Nx - abs(dx))
-                    dy = min(abs(dy), Ny - abs(dy))
                     msd[dtau] += dx * dx + dy * dy
                     tau[dtau] = times[tr[j][0]] - times[tr[i][0]]
                     cnt[dtau] += 1
@@ -1280,15 +1328,17 @@ class MonteCarlo2D:
         T_visits = np.zeros((n_rep, n_swaps + 1))
         E_series[:, 0] = [reps[r].total_energy() for r in range(n_rep)]
         T_visits[:, 0] = T_list
-        walker_T = list(T_list)              # walker r 当前实际温度
+        walker_T = list(T_list)              # walker r 当前实际温度（仅报告用）
         n_acc = np.zeros(n_rep - 1)
 
+        # 固定温度槽表述：每副本在其槽温演化，交换仅交换构型；walker_T 只做
+        # 报告——混合"walker 温演化 + 槽温判据"会破坏细致平衡
         for s in range(n_swaps):
-            # 本地演化（各 walker 在其当前温度演化）
+            # 本地演化（各副本在其固定槽温）
             for r in range(n_rep):
                 for _ in range(swap_interval):
-                    reps[r].mc_step(walker_T[r])
-            # 相邻交换（奇偶交替，基于温度槽的 β 与槽内能量）
+                    reps[r].mc_step(T_list[r])
+            # 相邻交换（奇偶交替；每对每轮恰好 1 次尝试）
             for parity in (0, 1):
                 for i in range(parity, n_rep - 1, 2):
                     E_i, E_j = reps[i].total_energy(), reps[i + 1].total_energy()
@@ -1300,14 +1350,14 @@ class MonteCarlo2D:
             E_series[:, s + 1] = [reps[r].total_energy() for r in range(n_rep)]
             T_visits[:, s + 1] = walker_T
             if verbose and (s + 1) % max(1, n_swaps // 10) == 0:
-                acc = n_acc / ((s + 1) * 2.0)  # 奇偶两轮
+                acc = n_acc / (s + 1.0)
                 print(f"PT sweep {s+1}/{n_swaps} | acc: "
                       + " ".join(f"{a:.2f}" for a in acc))
 
         spins_final = np.stack([reps[r].spins for r in range(n_rep)])
         return {"spins_final": spins_final, "E_series": E_series,
                 "T_visits": T_visits,
-                "acc_rate": n_acc / (n_swaps * 2.0),
+                "acc_rate": n_acc / n_swaps,
                 "E_hist": E_series[0]}
 
     def dynamic_structure_factor(self, traj, times, q_grid=None, t_max=None):
@@ -1330,30 +1380,39 @@ class MonteCarlo2D:
             q_grid = [(i, j) for i in range(0, Nx, stride) for j in range(0, Ny, stride)]
         dt = times[1] - times[0] if len(times) > 1 else 1.0
 
-        # S_q(t) = Σ_r S(r,t) e^{iq·r}（q_grid 为整数索引，实际 q = (qx/Nx, qy/Ny)）
+        # S_q(t) = Σ_b e^{−2πi(q·τ_b)} Σ_r S_b(r,t) e^{−2πi q·r}（q 为整数索引，
+        # 子格相位在频域、跨子格相干求和——与 spin_structure_factor 同约定）
         Sqt = np.zeros((len(q_grid), n_frames, 3), dtype=complex)
+        xg = np.arange(Nx)[:, None]
+        yg = np.arange(Ny)[None, :]
         for a, (qx, qy) in enumerate(q_grid):
-            ph = np.exp(-2j*np.pi*(qx*np.arange(Nx)[:, None]/Nx + qy*np.arange(Ny)[None, :]/Ny))
+            ph = np.exp(-2j*np.pi*(qx*xg/Nx + qy*yg/Ny))
             for t in range(n_frames):
                 for comp in range(3):
-                    Sqt[a, t, comp] = np.sum(traj[t, :, :, 0, comp] * ph)
+                    acc = 0j
+                    for b in range(Nb):
+                        f1, f2 = self.lat.basis[b]
+                        acc += (np.sum(traj[t, :, :, b, comp] * ph)
+                                * np.exp(-2j*np.pi*(qx*f1/Nx + qy*f2/Ny)))
+                    Sqt[a, t, comp] = acc
 
-        # 自相关 C(q,τ) = ⟨S_q(t+τ)·S_{−q}(t)⟩_t（FFT 法）
+        # 线性自相关 C(τ) = ⟨S_q(t+τ)·S_{−q}(t)⟩（FFT 零填充避免循环环绕，
+        # 每 τ 用有效样本数 n_frames−τ 归一）
         n_f = n_frames // 2
+        L = 2 * n_frames
+        norm = n_frames - np.arange(n_f, dtype=float)
         C = np.zeros((len(q_grid), n_f), dtype=complex)
         for a in range(len(q_grid)):
-            F = Sqt[a]                      # (n_frames, 3)
-            # 自相关 via FFT（每分量）
             for comp in range(3):
-                x = F[:, comp]
-                ac = np.fft.ifft(np.fft.fft(x) * np.conj(np.fft.fft(x))) / n_frames
-                C[a] += ac[:n_f]
+                x = Sqt[a, :, comp]
+                ac = np.fft.ifft(np.fft.fft(x, L) * np.conj(np.fft.fft(x, L)))[:n_f].real
+                C[a] += ac / norm
 
-        # 时间 → 频率：S(q,ω) = 2∫₀^T Re[C(τ)] cos(ωτ) dτ
-        omega = np.fft.rfftfreq(n_f, d=dt)
+        # 时间 → 频率（单边谱，含因子 2）：S(q,ν) = [2·Re Σ_{τ≥0} C(τ)e^{−i2πντ} − C(0)]·dt
+        omega = np.fft.rfftfreq(n_f, d=dt)     # 循环频率 ν = ω/2π
         S = np.zeros((len(q_grid), len(omega)))
         for a in range(len(q_grid)):
-            S[a] = np.fft.rfft(C[a].real).real * dt
+            S[a] = (2.0 * np.fft.rfft(C[a].real).real - C[a, 0].real) * dt
         return q_grid, omega, S
 
     def sqw_peak_extraction(self, S, omega, q_grid, q_indices=None, fit="lorentzian",
@@ -1462,21 +1521,30 @@ class MonteCarlo2D:
             frames = list(trajectory)
         Nx, Ny, Nb, _ = frames[0].shape
         coords = self.lat.get_cartesian_coords()
-        sp = species if species is not None else "X"
+        n_atoms = Nx * Ny * Nb
+        if species is None:
+            sp = ["X"] * n_atoms
+        elif isinstance(species, str):
+            sp = [species] * n_atoms
+        else:
+            sp = list(species)
+            if len(sp) != n_atoms:
+                raise ValueError(f"species 长度 {len(sp)} != 原子数 {n_atoms}")
 
         lines = []
         for fi, S in enumerate(frames):
-            n_atoms = Nx * Ny * Nb
             lines.append(str(n_atoms))
             lines.append(f"Frame {fi}  Lattice=\"{self.lat.a_vecs[0][0]:.6f} {self.lat.a_vecs[0][1]:.6f} 0.0 "
                          f"{self.lat.a_vecs[1][0]:.6f} {self.lat.a_vecs[1][1]:.6f} 0.0 "
                          f"0.0 0.0 10.0\"  Properties=species:S:1:pos:R:3:spin:R:3")
+            k = 0
             for x in range(Nx):
                 for y in range(Ny):
                     for b in range(Nb):
                         rx, ry = coords[x, y, b]
                         s = S[x, y, b] * spin_scale
-                        lines.append(f"{sp} {rx:.6f} {ry:.6f} 0.0 {s[0]:.6f} {s[1]:.6f} {s[2]:.6f}")
+                        lines.append(f"{sp[k]} {rx:.6f} {ry:.6f} 0.0 {s[0]:.6f} {s[1]:.6f} {s[2]:.6f}")
+                        k += 1
         text = "\n".join(lines) + "\n"
         if path:
             with open(path, "w") as f:
@@ -1593,40 +1661,43 @@ class MonteCarlo2D:
         if B_field.shape != (3,):
             raise ValueError("B_field 必须是长度为 3 的 Tesla 矢量")
 
-        # 显式设置外场，避免继承此前退火或磁滞计算留下的状态。
+        # 显式设置外场，避免继承此前退火或磁滞计算留下的状态；结束恢复原值
+        orig_B = self.ham.B_field_meV.copy()
         self.ham.B_field_meV = B_field * MU_S_MEV_PER_T
         results = []
         print(f"--- Numba: 温度扫描 (B={B_field} Tesla) ---")
-
-        for T in T_list:
-            self._validate_sampling(float(T), equip_steps, calc_steps, sample_interval)
-            for _ in range(equip_steps):
-                self.mc_step(T)
-
-            M_vec_samples = np.empty((calc_steps, 3), dtype=np.float64)
-            E_samples = np.empty(calc_steps, dtype=np.float64)
-            N = self.lat.N_total
-            for i in range(calc_steps):
-                for _ in range(sample_interval):
+        try:
+            for T in T_list:
+                self._validate_sampling(float(T), equip_steps, calc_steps, sample_interval)
+                for _ in range(equip_steps):
                     self.mc_step(T)
-                _, M_vec = self.get_magnetization()
-                M_vec_samples[i] = M_vec
-                E_samples[i] = self.total_energy() / N
 
-            M_mean_vec = np.mean(M_vec_samples, axis=0)
-            M_abs_mean = np.mean(np.linalg.norm(M_vec_samples, axis=1))
-            T_meV = float(T) * KB_MEV_PER_K
-            chi_per_meV = self.lat.N_total / T_meV * (
-                np.mean(M_vec_samples**2, axis=0) - M_mean_vec**2)
-            # h = mu_s B，因此 d<M>/dB = mu_s d<M>/dh。
-            chi_per_T = MU_S_MEV_PER_T * chi_per_meV
-            # 热容（涨落公式，每自旋, k_B 单位）：C_per_spin = N·Var(e)/(k_B T²)
-            C_kB = N * (np.mean(E_samples**2) - np.mean(E_samples)**2) / (KB_MEV_PER_K * T**2)
+                M_vec_samples = np.empty((calc_steps, 3), dtype=np.float64)
+                E_samples = np.empty(calc_steps, dtype=np.float64)
+                N = self.lat.N_total
+                for i in range(calc_steps):
+                    for _ in range(sample_interval):
+                        self.mc_step(T)
+                    _, M_vec = self.get_magnetization()
+                    M_vec_samples[i] = M_vec
+                    E_samples[i] = self.total_energy() / N
 
-            results.append([T, M_abs_mean, *chi_per_T, *chi_per_meV, C_kB])
-            print(f"T={T:.3f} K | <|M|>={M_abs_mean:.5f} | "
-                  f"Chi_B=(x:{chi_per_T[0]:.5f}, y:{chi_per_T[1]:.5f}, "
-                  f"z:{chi_per_T[2]:.5f}) 1/T | C={C_kB:.4f} kB/spin")
+                M_mean_vec = np.mean(M_vec_samples, axis=0)
+                M_abs_mean = np.mean(np.linalg.norm(M_vec_samples, axis=1))
+                T_meV = float(T) * KB_MEV_PER_K
+                chi_per_meV = self.lat.N_total / T_meV * (
+                    np.mean(M_vec_samples**2, axis=0) - M_mean_vec**2)
+                # h = mu_s B，因此 d<M>/dB = mu_s d<M>/dh。
+                chi_per_T = MU_S_MEV_PER_T * chi_per_meV
+                # 热容（涨落公式，每自旋, k_B 单位）：C_per_spin = N·Var(e)/(k_B T²)
+                C_kB = N * (np.mean(E_samples**2) - np.mean(E_samples)**2) / (KB_MEV_PER_K * T**2)
+
+                results.append([T, M_abs_mean, *chi_per_T, *chi_per_meV, C_kB])
+                print(f"T={T:.3f} K | <|M|>={M_abs_mean:.5f} | "
+                      f"Chi_B=(x:{chi_per_T[0]:.5f}, y:{chi_per_T[1]:.5f}, "
+                      f"z:{chi_per_T[2]:.5f}) 1/T | C={C_kB:.4f} kB/spin")
+        finally:
+            self.ham.B_field_meV = orig_B
 
         if output_file is not None:
             np.savetxt(output_file, results,
@@ -1647,20 +1718,24 @@ class MonteCarlo2D:
         results = []
         print(f"--- Numba: 磁滞回线 (T={T} K)，输出 <M_z> ---")
 
-        for Bz in B_list:
-            self.ham.B_field_meV = np.array([0.0, 0.0, Bz], dtype=np.float64) * MU_S_MEV_PER_T
-            for _ in range(equip_steps):
-                self.mc_step(T)
-
-            Mz_samples = np.empty(calc_steps, dtype=np.float64)
-            for i in range(calc_steps):
-                for _ in range(sample_interval):
+        orig_B = self.ham.B_field_meV.copy()
+        try:
+            for Bz in B_list:
+                self.ham.B_field_meV = np.array([0.0, 0.0, Bz], dtype=np.float64) * MU_S_MEV_PER_T
+                for _ in range(equip_steps):
                     self.mc_step(T)
-                Mz_samples[i] = self.get_magnetization()[1][2]
 
-            Mz_mean = np.mean(Mz_samples)
-            results.append([Bz, Mz_mean])
-            print(f"B_z={Bz:.4f} T | <M_z>={Mz_mean:.6f}")
+                Mz_samples = np.empty(calc_steps, dtype=np.float64)
+                for i in range(calc_steps):
+                    for _ in range(sample_interval):
+                        self.mc_step(T)
+                    Mz_samples[i] = self.get_magnetization()[1][2]
+
+                Mz_mean = np.mean(Mz_samples)
+                results.append([Bz, Mz_mean])
+                print(f"B_z={Bz:.4f} T | <M_z>={Mz_mean:.6f}")
+        finally:
+            self.ham.B_field_meV = orig_B
 
         np.savetxt(output_file, results, header="B_z(T) M_z_mean_spin", fmt="%.8f")
         return np.asarray(results)
@@ -1713,8 +1788,9 @@ def run_curie_temperature_seeds(ham_spec, a_vecs, basis, Nx, Ny, T_list,
     out = np.column_stack([mean[:, :2], std[:, :2], mean[:, 2:], std[:, 2:]])
     if output_file is not None:
         np.savetxt(output_file, out,
-                   header=("T(K) M_mean M_std Chi_perT_mean(3) Chi_perT_std(3) "
-                           "Chi_permeV_mean(3) Chi_permeV_std(3)"),
+                   header=("T(K) M_mean T_std M_std Chi_perT_mean(3) "
+                           "Chi_perT_std(3) Chi_permeV_mean(3) "
+                           "Chi_permeV_std(3) C_kB_mean C_kB_std"),
                    fmt="%.8f")
     print("完成。mean±std 已保存。")
     return mean, std, all_res
