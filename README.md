@@ -14,6 +14,8 @@
 5. **Spin structure factor S(q)**：自旋构型 FFT → 识别磁序（FM q=0 峰 / 螺旋 q* / skyrmion 晶格 Bragg 峰）
 6. **Magnon spectra**：共线 FM 线性自旋波（HP 一阶）色散 ω(k)（多子格、各向异性隙、Zeeman 隙）
 7. **Magnetic structure analysis**：自动识别磁序（FM/AFM/helical/skyrmion/PM）+ 提取磁性单胞（q* → 磁平移 → 商空间）
+8. **Magnetization curves**：等温 M(B) + 热磁 M(T) 双重扫描（`run_magnetization_curves`，cooling/heating 协议显式可选）
+9. **一阶场致跃迁**：易轴 AFM spin-flop demo（M_z 跳变 + 回滞 + 子格交错序判定）
 
 ## 模型
 
@@ -211,6 +213,33 @@ mean, std, all_res = run_curie_temperature_seeds(
     n_seeds=4, n_workers=4, base_seed=0,
 )
 ```
+
+### 等温磁化 M(B) / 热磁 M(T) 曲线
+
+```python
+T_list, B_list, M = mc.run_magnetization_curves(
+    T_list, B_list, equip_steps=8000, calc_steps=4000,
+    sample_interval=4, output_csv="magcurves.txt", protocol="cooling")
+# M[i,j] = <M_z>(T_i, B_j)；protocol='cooling' 每场从最高 T 降温（FC 式，默认），
+# 'heating' 升温——与输入顺序无关，结果按 T_list 原索引存放
+```
+
+- Tc 三量交叉验证：M(B) 陡升温度 = M(T) 骤降温度 = ΔS_M 峰位（CrI3 demo 均 ~37K）
+- ⚠️ 相变附近 heating/cooling 路径依赖（亚稳态）：协议已显式参数化，勿靠输入顺序隐式控制
+- ⚠️ B=0 列 ⟨M_z⟩ 符号历史依赖（自发磁化方向随机）——做 ΔS_M 类差分前对 B=0 取 |M|（同 run_magnetocaloric）
+
+### 一阶场致跃迁（spin-flop）与热滞
+
+demo：`run_spinflop_demo.py`（B 扫描）、`run_thermal_hysteresis_demo.py`（固定场 T 回线）。
+
+- **固定晶格 ≠ 只能算二阶**：易轴 AFM + 垂直场的 spin-flop 是纯自旋自由度的一阶跃迁
+  （24×24 honeycomb J=+1/A=−0.25/T=2K：上扫 ~13.5–14T 跳变 + 回滞宽度 ΔM=0.395）
+- **验证三件套**：① M_z(B) 不连续跳变；② 正反扫回滞宽度；③ 子格交错序 ΔS_x = ⟨S₁ₓ⟩−⟨S₂ₓ⟩
+  （flop 终态是面内 AFM，⟨S_x⟩≈0 是正常，必须用子格分辨判定；spins 布局 (Nx,Ny,Nb,3)）
+- **热滞判据**：np.interp 要求 x 升序——cooling 数组先反转；闭合回路面积 ∮ 用两支同向参数化的积分差
+- **实测负结果（物理非 bug）**：spin-flop 的 T 回线无热滞（A=−0.25/B=13.2T 与 A=−1.0/B=20.5T 两组，
+  heating/cooling 都在 ~3K 转变）——自旋翻转势垒对称 → 翻越温度由势垒唯一决定。真热滞需要成核-生长
+  不对称（候选：skyrmion 晶格熔化/结晶）；一阶跃迁场的热力学正确值需 parallel tempering
 
 ## 相对原版的改进（CHANGELOG）
 

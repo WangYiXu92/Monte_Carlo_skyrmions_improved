@@ -164,6 +164,41 @@ def test_pt_acc_rate():
     ok(f"acc_rate = {acc}（分母 n_swaps，修复前报告值减半）")
 
 
+def test_magcurves_protocol():
+    print("[P1] run_magnetization_curves 协议排序 + 冒烟")
+    lat = Lattice([[1.0, 0.0], [0.5, np.sqrt(3) / 2]], [[1 / 3, 1 / 3], [2 / 3, 2 / 3]], 4, 4)
+    ham = Hamiltonian(Nb=2, A_ani=-0.5)
+    for off in ([0, 0], [-1, 0], [0, -1]):
+        ham.add_bond(0, 1, off, np.diag([-6.0] * 3))
+    mc = MonteCarlo2D(lat, ham, seed=1)
+    T_in = [30.0, 5.0, 20.0]                     # 故意乱序输入
+    Ts, Bs, M_cool = mc.run_magnetization_curves(
+        T_in, [0.0, 2.0], equip_steps=10, calc_steps=20,
+        sample_interval=2, protocol="cooling")
+    assert M_cool.shape == (3, 2)
+    ok("magcurves 冒烟（乱序 T_list，输出按原索引存放）")
+    try:
+        mc.run_magnetization_curves(T_in, [0.0], 10, 20, protocol="bogus")
+        raise AssertionError("非法 protocol 未报错")
+    except ValueError:
+        pass
+    ok("非法 protocol 抛 ValueError")
+
+
+def test_hysteresis_area_criterion():
+    print("[P2] 回滞面积判据（∮=|∫fwd+∫bwd|，np.interp 需升序 x）")
+    grid = np.linspace(0.0, 2.0, 21)
+    B_up = np.array([0.0, 1.0, 2.0])
+    M_up = np.array([0.0, 0.5, 1.0])             # 上支
+    M_dn_at_B = np.array([0.6, 1.1, 1.0])        # 下支，按升序 B 排列（同场值偏移 → 有回线）
+    fwd = np.trapezoid(np.interp(grid, B_up, M_up), grid)                    # 0→2T 正扫
+    bwd = np.trapezoid(np.interp(grid, B_up, M_dn_at_B), grid)               # 反转后 interp
+    area = abs(fwd - bwd)                        # ∮ = |∫fwd − ∫bwd|（两支都按升序参数化）
+    expect = abs(np.trapezoid(M_up - M_dn_at_B, B_up))
+    assert abs(area - expect) < 1e-9 and area > 0.05
+    ok(f"闭合回路面积 = {area:.3f} = ∮（∫fwd−∫bwd ≡ ∫(上支−下支)，降序数组先反转再 interp）")
+
+
 if __name__ == "__main__":
     test_core_engine()
     test_local_field_nb2()
@@ -172,4 +207,6 @@ if __name__ == "__main__":
     test_phase_diagram_nb2()
     test_export_xyz_species()
     test_pt_acc_rate()
+    test_magcurves_protocol()
+    test_hysteresis_area_criterion()
     print(f"\n全部 {PASS} 项回归测试通过 ✅")

@@ -1773,24 +1773,34 @@ class MonteCarlo2D:
         return np.asarray(results)
 
     def run_magnetization_curves(self, T_list, B_list, equip_steps, calc_steps,
-                                 sample_interval=4, output_csv=None):
+                                 sample_interval=4, output_csv=None,
+                                 protocol="cooling"):
         """等温磁化曲线 M(B) 与热磁曲线 M(T)：T×B 双重扫描采样 <M_z>。
 
-        循环序 B 外 T 内（同 run_magnetocaloric）：每个 B 沿 T 降序冷却，
-        B=0 态继承前一 T——即"零场冷却后升场"协议；每个 (T,B) 平衡
-        ``equip_steps`` sweep 后对 ``calc_steps`` 个记录点求 <M_z> 平均。
-        返回 (T_list, B_list, M[nT, nB])：M[i,j] = M(T_i, B_j)（每自旋 z 分量）。
-        output_csv 给定时写 3 列 T B M。
+        循环序 B 外 T 内（同 run_magnetocaloric）。protocol 决定每个 B 内的
+        T 访问顺序（与输入顺序无关，结果仍按 T_list 原索引存放）：
+          'cooling' — 每个场从最高 T 逐点降温（零场冷却后升场，FC 式，默认）
+          'heating' — 从最低 T 逐点升温
+        每个 (T,B) 平衡 ``equip_steps`` sweep 后对 ``calc_steps`` 个记录点求
+        <M_z> 平均。返回 (T_list, B_list, M[nT, nB])：M[i,j] = M(T_i, B_j)
+        （每自旋 z 分量）。output_csv 给定时写 3 列 T B M。
         """
         import numpy as np
+        if protocol not in ("cooling", "heating"):
+            raise ValueError("protocol 必须为 'cooling' / 'heating'")
         nT, nB = len(T_list), len(B_list)
         M = np.zeros((nT, nB))
-        print(f"--- 磁化曲线: {nT} 温度 × {nB} 场 ---")
+        # 显式排序（同 run_phase_diagram 的协议处理）：cooling=降温、heating=升温
+        T_asc = sorted(float(t) for t in T_list)
+        T_order = list(reversed(T_asc)) if protocol == "cooling" else T_asc
+        it_of = {T: i for i, T in enumerate(T_list)}
+        print(f"--- 磁化曲线: {nT} 温度 × {nB} 场 (protocol={protocol}) ---")
         orig_B = self.ham.B_field_meV.copy()
         try:
             for j, Bz in enumerate(B_list):
                 self.ham.B_field_meV = np.array([0.0, 0.0, Bz], dtype=np.float64) * MU_S_MEV_PER_T
-                for i, T in enumerate(T_list):
+                for T in T_order:
+                    it = it_of[T]
                     self._validate_sampling(float(T), equip_steps, calc_steps, sample_interval)
                     for _ in range(equip_steps):
                         self.mc_step(T)
@@ -1799,8 +1809,8 @@ class MonteCarlo2D:
                         for _ in range(sample_interval):
                             self.mc_step(T)
                         m_acc += self.get_magnetization()[1][2]
-                    M[i, j] = m_acc / calc_steps
-                    print(f"  B={Bz:5.2f} T  T={T:6.1f} K  M={M[i,j]:.3f}")
+                    M[it, j] = m_acc / calc_steps
+                    print(f"  B={Bz:5.2f} T  T={T:6.1f} K  M={M[it,j]:.3f}")
         finally:
             self.ham.B_field_meV = orig_B
         if output_csv:
